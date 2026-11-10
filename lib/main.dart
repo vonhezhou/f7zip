@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import 'archive_engine.dart';
+import 'archive_backup.dart';
 import 'archive_drag.dart';
 import 'archive_task.dart';
 import 'archive_task_panel.dart';
@@ -1456,6 +1457,12 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     String destination = '',
   }) async {
     if (!_interactive || !_editable || _archive == null) return false;
+    if (operation == 'restore' &&
+        (_edits?.sessions.any((session) => session.archive == _archive) ??
+            false)) {
+      await _error('此压缩包正在外部编辑，请先在“管理编辑文件”中结束全部监控');
+      return false;
+    }
     final archive = _archive!;
     final version = _archiveVersion;
     var password = _password;
@@ -1475,6 +1482,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
             'remove': '删除条目',
             'rename': '重命名',
             'mkdir': '新建文件夹',
+            'restore': '恢复原包备份',
           };
           final result = await _run(
             labels[action]!,
@@ -1582,11 +1590,99 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     }
     if (!await _confirm(
       '从压缩包删除',
-      '删除选中的 ${paths.length} 个条目及目录中的文件？\n\n${paths.take(8).join('\n')}',
+      '删除选中的 ${paths.length} 个条目及目录中的文件？修改前会完整备份原包，可通过“更多操作 → 恢复原包备份”恢复。\n\n${paths.take(8).join('\n')}',
     )) {
       return;
     }
     if (mounted) await _mutateArchive('remove', inputs: paths);
+  }
+
+  Future<void> _restoreBackup() async {
+    if (!_interactive || !_editable || _archive == null) return;
+    final archive = _archive!;
+    try {
+      final backups = await findArchiveBackups(archive);
+      if (!mounted) return;
+      if (backups.isEmpty) {
+        await _error('此压缩包还没有原包备份。修改前的完整备份会保存在原包同级的独立目录中。');
+        return;
+      }
+      final selected = await showDialog<ArchiveBackup>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('恢复原包备份'),
+          content: SizedBox(
+            width: 480,
+            height: 300,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '选择修改前的完整版本。恢复会替换整个压缩包，当前版本也会先备份。备份占用磁盘空间，可在 Finder 中手动清理。',
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: backups.length,
+                    itemBuilder: (context, index) {
+                      final backup = backups[index];
+                      return ListTile(
+                        dense: true,
+                        title: Text(backup.modified.toLocal().toString()),
+                        subtitle: Text(
+                          '${backup.size} 字节 · ${p.basename(p.dirname(backup.path))}',
+                        ),
+                        onTap: () => Navigator.pop(context, backup),
+                        trailing: IconButton(
+                          tooltip: '在 Finder 显示备份',
+                          icon: const Icon(Icons.folder_open_outlined),
+                          onPressed: () => _desktop.invokeMethod<void>(
+                            'reveal',
+                            backup.path,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+          ],
+        ),
+      );
+      if (selected == null || !mounted || _archive != archive) return;
+      final listing = await _run(
+        '读取备份',
+        ArchiveRequest(
+          'list',
+          selected.path,
+          password: _password,
+          codePage: _archiveCodePage,
+        ),
+      );
+      if (listing == null || !mounted) return;
+      if (!await _confirm(
+        '恢复整个压缩包？',
+        '将恢复到 ${selected.modified.toLocal()} 的版本，包含当时的全部条目。当前版本将另存备份。',
+      )) {
+        return;
+      }
+      if (mounted && _archive == archive) {
+        await _mutateArchive(
+          'restore',
+          item: listing['version'] as String,
+          destination: selected.path,
+        );
+      }
+    } catch (error) {
+      await _error(error);
+    }
   }
 
   Future<void> _renameSelected() async {
@@ -1664,6 +1760,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         break;
       case 'remove':
         await _removeSelected();
+        break;
+      case 'restore':
+        await _restoreBackup();
         break;
       case 'rename':
         await _renameSelected();
@@ -2888,6 +2987,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               value: 'mkdir',
               enabled: _editable && _archive != null,
               child: const Text('新建文件夹…'),
+            ),
+            PopupMenuItem(
+              value: 'restore',
+              enabled: _editable && _archive != null,
+              child: const Text('恢复原包备份…'),
             ),
             PopupMenuItem(
               value: 'tree',

@@ -105,8 +105,8 @@ public:
     localfs::path path;
     bool preserve = false;
     int descriptor = -1;
-    explicit StagingDirectory(const localfs::path& parent) {
-        auto pattern = (parent / ".f7zip-XXXXXX").string();
+    explicit StagingDirectory(const localfs::path& parent, const std::string& prefix = ".f7zip-") {
+        auto pattern = (parent / (prefix + "XXXXXX")).string();
         std::vector<char> buffer(pattern.begin(), pattern.end());
         buffer.push_back(0);
         char* created = mkdtemp(buffer.data());
@@ -1734,11 +1734,29 @@ static char* mutateArchive(
         }
         StagingDirectory staging(target.parent_path());
         const auto modified = staging.path / (sevenZip ? "updated.7z" : "updated.zip");
-        if (copyfile(target.c_str(), modified.c_str(), nullptr, COPYFILE_ALL | COPYFILE_EXCL) != 0) {
+        localfs::path source = target;
+        std::string restoreVersion;
+        if (action == "restore") {
+            source = localfs::absolute(editedFile).lexically_normal();
+            const auto prefix = target.filename().string() + ".f7zip-backup-";
+            if (localfs::canonical(source) != source || source.parent_path().parent_path() != target.parent_path() ||
+                source.parent_path().filename().string().compare(0, prefix.size(), prefix) != 0 ||
+                source.filename() != (sevenZip ? "original.7z" : "original.zip")) {
+                throw std::runtime_error("请选择此压缩包的原始备份文件，备份目录和文件不能使用符号链接");
+            }
+            restoreVersion = itemPath;
+            if (restoreVersion.empty() || archiveVersion(source.c_str()) != restoreVersion) {
+                throw std::runtime_error("备份文件已发生变化，请重新选择");
+            }
+        }
+        if (copyfile(source.c_str(), modified.c_str(), nullptr, COPYFILE_ALL | COPYFILE_EXCL) != 0) {
             throw std::runtime_error("无法创建压缩包更新副本，请检查权限与磁盘空间");
         }
+        if (action == "restore" && archiveVersion(source.c_str()) != restoreVersion) {
+            throw std::runtime_error("读取期间备份文件发生变化，已停止恢复");
+        }
         if (archiveVersion(archive) != expected) throw std::runtime_error("复制期间原压缩包发生变化，已停止更新");
-        {
+        if (action != "restore") {
             BitArchiveEditor editor(library, modified.string(), sevenZip ? BitFormat::SevenZip : BitFormat::Zip, password);
             callbacks(editor, job);
             editor.setPassword(encrypted || cryptHeaders ? password : "", cryptHeaders);
@@ -1757,10 +1775,14 @@ static char* mutateArchive(
             BitArchiveReader verified(library, modified.string(), BitFormat::Auto, password);
             callbacks(verified, job);
             verified.test();
+            if ((verified.detectedFormat() == BitFormat::SevenZip) != sevenZip ||
+                (!sevenZip && verified.detectedFormat() != BitFormat::Zip)) {
+                throw std::runtime_error("备份与原压缩包格式不一致");
+            }
             items = archiveItems(verified, job);
             comment = archiveComment(verified);
         }
-        if (copyfile(target.c_str(), modified.c_str(), nullptr, COPYFILE_METADATA) != 0) {
+        if (action != "restore" && copyfile(target.c_str(), modified.c_str(), nullptr, COPYFILE_METADATA) != 0) {
             throw std::runtime_error("无法保留原压缩包文件属性，已停止更新");
         }
         const struct timespec times[2] = {{0, UTIME_OMIT}, {0, UTIME_NOW}};
@@ -1770,14 +1792,35 @@ static char* mutateArchive(
         const int flushed = fsync(output);
         close(output);
         if (flushed != 0) throw std::runtime_error("压缩包更新副本未能完整保存");
+        // 每次发布前保存独立完整副本，恢复操作也遵循相同保护。
+        StagingDirectory backup(target.parent_path(), target.filename().string() + ".f7zip-backup-");
+        const auto backupFile = backup.path / (sevenZip ? "original.7z" : "original.zip");
+        if (copyfile(target.c_str(), backupFile.c_str(), nullptr, COPYFILE_ALL | COPYFILE_EXCL) != 0) {
+            throw std::runtime_error("无法备份原压缩包，已停止修改，请检查权限与磁盘空间");
+        }
+        const int backupDescriptor = open(backupFile.c_str(), O_RDONLY | O_NOFOLLOW);
+        if (backupDescriptor < 0) throw std::runtime_error("无法校验原包备份，已停止修改");
+        const int backupFlushed = fsync(backupDescriptor);
+        close(backupDescriptor);
+        if (backupFlushed != 0 || fsync(backup.descriptor) != 0) {
+            throw std::runtime_error("原包备份未能完整保存，已停止修改");
+        }
+        const int parentDescriptor = open(target.parent_path().c_str(), O_RDONLY | O_DIRECTORY);
+        if (parentDescriptor < 0) throw std::runtime_error("无法保存备份目录，已停止修改");
+        const int parentFlushed = fsync(parentDescriptor);
+        close(parentDescriptor);
+        if (parentFlushed != 0) throw std::runtime_error("备份目录未能完整保存，已停止修改");
         checkCancellation(job);
         if (archiveVersion(archive) != expected || archiveVersion(target.c_str()) != expected) {
             throw std::runtime_error("更新期间原压缩包发生变化，已保留编辑文件");
         }
+        // 从此处开始即使发布失败也保留备份，便于手动恢复。
+        backup.preserve = true;
         if (rename(modified.c_str(), target.c_str()) != 0) {
             throw std::runtime_error("无法替换原压缩包，已保留编辑文件");
         }
         return result("{\"ok\":true,\"editable\":true,\"version\":" + quote(archiveVersion(archive)) +
+            ",\"backup\":" + quote(backupFile.string()) +
             ",\"comment\":" + quote(comment) + ",\"items\":" + items + "}");
     } catch (const MutationConflict& conflict) {
         std::string paths = "[";

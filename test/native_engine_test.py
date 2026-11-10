@@ -5,6 +5,7 @@ import io
 import lzma
 import tarfile
 import struct
+import subprocess
 import ctypes
 import fcntl
 import json
@@ -365,6 +366,101 @@ class NativeEngineTest(unittest.TestCase):
             self.assertEqual(reader.read('中文目录/你好.txt').decode(), '已编辑的内容')
             self.assertEqual(reader.read('中文目录/line\nbreak.txt'), b'newline filename')
         self.assertEqual(archive.stat().st_mode & 0o777, 0o640)
+        self.assert_no_staging()
+
+    def test_mutations_back_up_exact_original_and_restore_deleted_entries(self):
+        for format in ['zip', '7z']:
+            archive = self.create(format)
+            archive.chmod(0o640)
+            subprocess.run(['/usr/bin/xattr', '-w', 'com.f7zip.backup-test', 'original attribute', str(archive)], check=True)
+            original = archive.read_bytes()
+            version = execute('list', archive)['version']
+            removed = mutate(archive, 'remove', version, inputs=['中文目录/你好.txt'])
+            self.assertTrue(removed['ok'], removed)
+            backup = Path(removed['backup'])
+            self.assertEqual(backup.read_bytes(), original)
+            self.assertEqual(backup.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(backup.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(subprocess.check_output(['/usr/bin/xattr', '-p', 'com.f7zip.backup-test', str(backup)]).strip(), b'original attribute')
+            deleted = archive.read_bytes()
+            restored = mutate(archive, 'restore', removed['version'],
+                              item=execute('list', backup)['version'], destination=backup)
+            self.assertTrue(restored['ok'], restored)
+            self.assertEqual(archive.read_bytes(), original)
+            self.assertEqual(Path(restored['backup']).read_bytes(), deleted)
+            self.assertNotEqual(restored['backup'], str(backup))
+            self.assertTrue(any(item['path'] == '中文目录/你好.txt' for item in restored['items']))
+        self.assert_no_staging()
+
+    def test_edit_writeback_creates_independent_backup(self):
+        archive = self.create()
+        original = archive.read_bytes()
+        edited = self.root / 'edited.txt'
+        edited.write_text('new content')
+        response = update(archive, '中文目录/你好.txt', edited, execute('list', archive)['version'])
+        self.assertTrue(response['ok'], response)
+        backup = Path(response['backup'])
+        self.assertEqual(backup.read_bytes(), original)
+        archive.write_bytes(b'external replacement')
+        self.assertEqual(backup.read_bytes(), original)
+
+    def test_backup_creation_failure_preserves_current_archive(self):
+        archive = self.root / ('a' * 240 + '.zip')
+        with zipfile.ZipFile(archive, 'w') as writer:
+            writer.writestr('hello.txt', b'original')
+        original = archive.read_bytes()
+        response = mutate(archive, 'remove', execute('list', archive)['version'], inputs=['hello.txt'])
+        self.assertFalse(response['ok'], response)
+        self.assertEqual(archive.read_bytes(), original)
+        self.assert_no_staging()
+
+    def test_restore_rejects_stale_archive_backup_and_symlink(self):
+        archive = self.create()
+        original_version = execute('list', archive)['version']
+        removed = mutate(archive, 'remove', original_version, inputs=['中文目录/你好.txt'])
+        backup = Path(removed['backup'])
+        backup_version = execute('list', backup)['version']
+        current = archive.read_bytes()
+        self.assertFalse(mutate(archive, 'restore', original_version,
+                                item=backup_version, destination=backup)['ok'])
+        self.assertFalse(mutate(archive, 'restore', removed['version'],
+                                item='stale', destination=backup)['ok'])
+        external = self.root / 'external.zip'
+        backup.rename(external)
+        backup.symlink_to(external)
+        self.assertFalse(mutate(archive, 'restore', removed['version'],
+                                item=execute('list', external)['version'], destination=backup)['ok'])
+        self.assertEqual(archive.read_bytes(), current)
+        self.assertEqual(len(list(self.root.glob('*.f7zip-backup-*'))), 1)
+        self.assert_no_staging()
+
+    def test_restore_wrong_password_corruption_and_cancel_keep_current(self):
+        archive = self.create('7z', 'secret')
+        removed = mutate(archive, 'remove', execute('list', archive, password='secret')['version'],
+                         inputs=['中文目录/你好.txt'], password='secret')
+        backup = Path(removed['backup'])
+        version = execute('list', backup, password='secret')['version']
+        current = archive.read_bytes()
+        response = mutate(archive, 'restore', removed['version'], item=version,
+                          destination=backup, password='wrong')
+        self.assertFalse(response['ok'], response)
+        job = LIB.f7_job_create()
+        LIB.f7_job_cancel(job)
+        try:
+            response = mutate(archive, 'restore', removed['version'], item=version,
+                              destination=backup, password='secret', job=job)
+            self.assertTrue(response['cancelled'], response)
+        finally:
+            LIB.f7_job_destroy(job)
+        backup.write_bytes(b'corrupt backup')
+        info = backup.stat()
+        version = ':'.join(str(value) for value in [info.st_dev, info.st_ino, info.st_size,
+                           info.st_mtime_ns // 10**9, info.st_mtime_ns % 10**9,
+                           info.st_ctime_ns // 10**9, info.st_ctime_ns % 10**9])
+        self.assertFalse(mutate(archive, 'restore', removed['version'], item=version,
+                                destination=backup, password='secret')['ok'])
+        self.assertEqual(archive.read_bytes(), current)
+        self.assertEqual(len(list(self.root.glob('*.f7zip-backup-*'))), 1)
         self.assert_no_staging()
 
     def test_update_preserves_zip_and_7z_encryption(self):

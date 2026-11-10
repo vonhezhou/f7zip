@@ -394,6 +394,7 @@ Map<String, dynamic> _execute(
       'remove',
       'rename',
       'mkdir',
+      'restore',
     }.contains(request.operation)) {
       final mutate = library.lookupFunction<_MutateNative, _Mutate>(
         'f7_mutate',

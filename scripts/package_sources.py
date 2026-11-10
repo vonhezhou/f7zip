@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 import tarfile
 
+from build_native import SOURCE_ARCHIVE
+
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / 'dist'
 DIST.mkdir(exist_ok=True)
@@ -25,7 +27,7 @@ with tarfile.open(DIST / 'F7Zip-sources.tar.gz', 'w:gz') as archive:
         if relative.parts[:2] in [('native', 'lib'), ('native', 'vendor')]:
             continue
         archive.add(path, arcname=str(Path('f7zip') / relative), recursive=False)
-    for source in ['7zip.tar.xz', 'bit7z-source.tar.gz']:
-        archive.add(ROOT / 'native/vendor' / source,
-                    arcname='f7zip/third_party/' + source, recursive=False)
+    for source, name in [(SOURCE_ARCHIVE, '7zip.tar.xz'),
+                         (bit7z_archive, 'bit7z-source.tar.gz')]:
+        archive.add(source, arcname='f7zip/third_party/' + name, recursive=False)
 print(DIST / 'F7Zip-sources.tar.gz')

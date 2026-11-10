@@ -7,15 +7,19 @@ from pathlib import Path
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / 'native/vendor'
-ENGINE = VENDOR / '7zip'
+ENGINE_VERSION = '26.06'
+SOURCE_ARCHIVE = VENDOR / f'7z{ENGINE_VERSION.replace(".", "")}-src.tar.xz'
+SOURCE_URL = f'https://github.com/ip7z/7zip/releases/download/{ENGINE_VERSION}/{SOURCE_ARCHIVE.name}'
+ENGINE = VENDOR / f'7zip-{ENGINE_VERSION}'
 BIT7Z = VENDOR / 'bit7z'
 LIB = ROOT / 'native/lib'
-OBJECTS = VENDOR / 'objects'
-SOURCE_HASH = '3e596155744af055a77fc433c703d54e3ea9212246287b5b1436a6beac060f16'
+OBJECTS = VENDOR / f'objects-{ENGINE_VERSION}'
+SOURCE_HASH = 'a4e374c8f864f51df48c2cfd0e1413ec3b2ea030deae852d6a655402ebb61ac4'
 BIT7Z_SOURCE_HASH = '5a79f9cd2f7bc17ae4088a6b7ac9b5b08476082c1404c98c50ae52aa441559ae'
 BIT7Z_COMMIT = '0f03717920442abcdba80183534931c867feb9c0'
 
@@ -28,18 +32,26 @@ def main():
     VENDOR.mkdir(parents=True, exist_ok=True)
     LIB.mkdir(parents=True, exist_ok=True)
     OBJECTS.mkdir(parents=True, exist_ok=True)
-    archive = VENDOR / '7zip.tar.xz'
+    archive = SOURCE_ARCHIVE
     bundled_engine = ROOT / 'third_party/7zip.tar.xz'
     if not archive.exists() and bundled_engine.exists():
         shutil.copy2(bundled_engine, archive)
     if not archive.exists():
-        urllib.request.urlretrieve('https://www.7-zip.org/a/7z2600-src.tar.xz', archive)
+        with tempfile.TemporaryDirectory(prefix='.download-', dir=VENDOR) as directory:
+            downloaded = Path(directory) / archive.name
+            urllib.request.urlretrieve(SOURCE_URL, downloaded)
+            if hashlib.sha256(downloaded.read_bytes()).hexdigest() != SOURCE_HASH:
+                raise RuntimeError('下载的 7-Zip 源码校验失败')
+            downloaded.replace(archive)
     if hashlib.sha256(archive.read_bytes()).hexdigest() != SOURCE_HASH:
-        raise RuntimeError('7-Zip 源码校验失败，请删除 native/vendor/7zip.tar.xz 后重新构建')
+        raise RuntimeError(f'7-Zip 源码校验失败，请检查 {archive}')
     if not ENGINE.exists():
-        ENGINE.mkdir()
-        with tarfile.open(archive) as source:
-            source.extractall(ENGINE)
+        with tempfile.TemporaryDirectory(prefix='.source-', dir=VENDOR) as directory:
+            unpacked = Path(directory) / 'source'
+            unpacked.mkdir()
+            with tarfile.open(archive) as source:
+                source.extractall(unpacked)
+            unpacked.rename(ENGINE)
     bundled_bit7z = ROOT / 'third_party/bit7z-source.tar.gz'
     if not BIT7Z.exists():
         if bundled_bit7z.exists():
@@ -86,7 +98,7 @@ def main():
     shutil.copy2(ENGINE / 'DOC/License.txt', licenses / '7zip.txt')
     shutil.copy2(ENGINE / 'DOC/copying.txt', licenses / 'LGPL-2.1.txt')
     shutil.copy2(BIT7Z / 'LICENSE', licenses / 'bit7z-MPL-2.0.txt')
-    print('Native libraries ready at', LIB)
+    print(f'7-Zip {ENGINE_VERSION} native libraries ready at {LIB}')
 
 
 if __name__ == '__main__':

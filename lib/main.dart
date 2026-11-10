@@ -2837,7 +2837,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         content: const SizedBox(
           width: 400,
           child: SelectableText(
-            '开源 macOS 压缩工具\n\nFlutter 界面 · 7-Zip 26.00 原生引擎\nbit7z 4.0.10 C++ 封装\n\nF7Zip 使用 MIT 许可证。\n7-Zip 遵循 LGPL、BSD 及 unRAR 限制。\nbit7z 遵循 MPL-2.0。\n\n支持 ZIP / 7z 创建与编辑回写，多格式浏览与解压。',
+            '开源 macOS 压缩工具\n\nFlutter 界面 · 7-Zip 26.06 原生引擎\nbit7z 4.0.10 C++ 封装\n\nF7Zip 使用 MIT 许可证。\n7-Zip 遵循 LGPL、BSD 及 unRAR 限制。\nbit7z 遵循 MPL-2.0。\n\n支持 ZIP / 7z 创建与编辑回写，多格式浏览与解压。',
           ),
         ),
         actions: [

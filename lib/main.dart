@@ -581,6 +581,10 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     bool dragExport = false,
   }) async {
     if (_tryingPasswords) return null;
+    request = request.withPassword(
+      request.password,
+      filenameNormalization: _preferences.filenameNormalization,
+    );
     final automatic =
         _preferences.autoTryPasswords && request.operation != 'compress';
     if (!automatic) return _runOnce(task, request, dragExport: dragExport);

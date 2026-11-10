@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 
 uint32_t detectZipCodePage(const char* archive);
 
@@ -19,3 +20,5 @@ private:
     uint32_t previous;
     uint32_t selected;
 };
+
+std::string normalizeUnicodeName(const std::string& value, uint32_t mode);

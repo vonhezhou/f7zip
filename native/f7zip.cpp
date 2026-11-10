@@ -40,6 +40,7 @@ using namespace bit7z;
 
 struct Job {
     uint32_t codePage = 0;
+    uint32_t filenameNormalization = 0;
     uint64_t volumeSize = 0;
     uint32_t extractionPolicy = 0;
     std::string expectedDestinationVersion;
@@ -425,6 +426,20 @@ static std::string appleDoubleName(const std::string& target, bool macosx) {
     return (macosx ? localfs::path("__MACOSX") / relative : relative).generic_string();
 }
 
+// 连同隐含父目录一起检查，防止不同拼写的目录在转换时被静默合并。
+static std::string recordUnicodePath(std::map<std::string, std::string>& paths, const std::string& name, uint32_t mode) {
+    const auto normalized = normalizeUnicodeName(name, mode);
+    for (auto path = localfs::path(name); !path.empty(); path = path.parent_path()) {
+        const auto raw = path.generic_string();
+        const auto key = normalizeUnicodeName(raw, mode);
+        const auto [found, inserted] = paths.emplace(key, raw);
+        if (!inserted && found->second != raw) {
+            throw std::runtime_error("Unicode 文件名规范化后存在重名（" + found->second + " / " + raw + "）");
+        }
+    }
+    return normalized;
+}
+
 static bool hasMacMetadata(const localfs::path& source) {
     const auto size = listxattr(source.c_str(), nullptr, 0, XATTR_NOFOLLOW);
     if (size < 0) throw std::runtime_error("无法读取源文件扩展属性");
@@ -457,14 +472,18 @@ static std::vector<std::pair<std::string, std::string>> compressionInputs(const 
     const localfs::path& staging, bool tar, Job* job) {
     std::vector<std::pair<std::string, std::string>> inputs;
     std::map<std::string, localfs::path> entries;
+    std::map<std::string, std::string> unicodePaths;
     for (const auto& value : paths) {
         const localfs::path path(value);
         const auto rootName = path.filename().string();
-        if (!entries.emplace(rootName, path).second) throw std::runtime_error("所选输入包含同名顶层项目");
+        const auto normalizedRoot = recordUnicodePath(unicodePaths, rootName, job->filenameNormalization);
+        if (!entries.emplace(normalizedRoot, path).second) throw std::runtime_error("所选输入包含同名顶层项目");
         if (!localfs::is_directory(localfs::symlink_status(path))) continue;
         for (const auto& entry : localfs::recursive_directory_iterator(path)) {
             checkCancellation(job);
-            entries.emplace((localfs::path(rootName) / entry.path().lexically_relative(path)).generic_string(), entry.path());
+            const auto name = (localfs::path(rootName) / entry.path().lexically_relative(path)).generic_string();
+            const auto normalized = recordUnicodePath(unicodePaths, name, job->filenameNormalization);
+            if (!entries.emplace(normalized, entry.path()).second) throw std::runtime_error("所选输入包含重复路径");
         }
     }
     size_t index = 0;
@@ -487,6 +506,28 @@ static std::vector<std::pair<std::string, std::string>> compressionInputs(const 
             }
             const struct timespec times[] = {status.st_atimespec, status.st_mtimespec};
             if (utimensat(AT_FDCWD, input.c_str(), times, 0) != 0) throw std::runtime_error("无法暂存目录时间");
+        }
+        if (job->filenameNormalization && localfs::is_symlink(localfs::symlink_status(path))) {
+            const auto links = staging / "link-entries" / std::to_string(index);
+            input = links / logicalPath(name);
+            const auto target = normalizeUnicodeName(localfs::read_symlink(path).generic_string(), job->filenameNormalization);
+            const auto resolved = (input.parent_path() / target).lexically_normal();
+            const auto relative = resolved.lexically_relative(links);
+            if (localfs::path(target).is_absolute() || relative.empty() || *relative.begin() == "..") {
+                throw std::runtime_error("规范化符号链接需要包内相对目标");
+            }
+            localfs::create_directories(input.parent_path());
+            // bit7z 会检查链接可解析，私有镜像内的占位目标仅用于这一检查。
+            if (!localfs::exists(resolved)) {
+                localfs::create_directories(resolved.parent_path());
+                std::ofstream placeholder(resolved, std::ios::binary);
+                if (!placeholder) throw std::runtime_error("无法准备符号链接目标");
+            }
+            localfs::create_symlink(target, input);
+            struct stat status{};
+            if (lstat(path.c_str(), &status) != 0) throw std::runtime_error("无法读取符号链接时间");
+            const struct timespec times[] = {status.st_atimespec, status.st_mtimespec};
+            if (utimensat(AT_FDCWD, input.c_str(), times, AT_SYMLINK_NOFOLLOW) != 0) throw std::runtime_error("无法暂存符号链接时间");
         }
         inputs.emplace_back(input.string(), name);
         ++index;
@@ -547,7 +588,10 @@ protected:
 
 static std::map<std::string, std::string> archiveMetadata(BitArchiveReader& reader, Job* job) {
     std::map<std::string, std::string> metadata;
-    for (const auto& item : reader.items()) {
+    const auto items = reader.items();
+    std::map<std::string, std::string> aliases;
+    for (const auto& item : items) recordUnicodePath(aliases, logicalPath(item.path(), true), 2);
+    for (const auto& item : items) {
         checkCancellation(job);
         if (item.isDir()) continue;
         const auto name = logicalPath(item.path(), true);
@@ -556,7 +600,10 @@ static std::map<std::string, std::string> archiveMetadata(BitArchiveReader& read
         AppleDoubleHeader header;
         std::ostream stream(&header);
         reader.extractTo(stream, item.index());
-        if (appleDoubleMagic(header.bytes, header.size)) metadata[name] = target;
+        if (appleDoubleMagic(header.bytes, header.size)) {
+            const auto found = aliases.find(normalizeUnicodeName(target, 2));
+            metadata[name] = found == aliases.end() ? target : found->second;
+        }
     }
     return metadata;
 }
@@ -587,14 +634,14 @@ static void validateAppleDouble(const localfs::path& sidecar, uint64_t size) {
 }
 
 static void restoreMacMetadata(const localfs::path& staging, const std::vector<BitArchiveItemInfo>& items, Job* job) {
-    std::set<std::string> targets;
-    for (const auto& item : items) targets.insert(logicalPath(item.path(), true));
+    std::map<std::string, std::string> targets;
+    for (const auto& item : items) recordUnicodePath(targets, logicalPath(item.path(), true), 2);
     for (const auto& item : items) {
         checkCancellation(job);
         if (item.isDir()) continue;
         const auto name = logicalPath(item.path(), true);
         const auto targetName = appleDoubleTarget(name);
-        if (targetName.empty() || !targets.count(targetName)) continue;
+        if (targetName.empty() || !targets.count(normalizeUnicodeName(targetName, 2))) continue;
         const auto sidecar = staging / name;
         const auto target = staging / targetName;
         struct stat sourceStatus{}, targetStatus{};
@@ -699,6 +746,7 @@ static void extractSafely(BitArchiveReader& reader, const localfs::path& staging
     const uint32_t* indices, int count, Job* job, ExtractionPermissions& permissions) {
     const auto items = reader.items();
     std::map<std::string, const BitArchiveItemInfo*> names;
+    std::map<std::string, std::string> unicodePaths;
     std::map<std::string, std::string> links;
     std::map<std::string, std::string> hardLinks;
     std::set<uint32_t> selected;
@@ -708,6 +756,7 @@ static void extractSafely(BitArchiveReader& reader, const localfs::path& staging
         validateEntry(item, true);
         const auto name = extractedPath(item);
         if (name.empty()) { if (!item.isDir()) throw std::runtime_error("归档包含空文件路径"); continue; }
+        recordUnicodePath(unicodePaths, name, 2);
         if (!names.emplace(name, &item).second) throw std::runtime_error("归档存在重复路径，无法安全解压");
         if (count == 0) selected.insert(item.index());
         const auto hard = item.itemProperty(BitProperty::HardLink);
@@ -741,13 +790,17 @@ static void extractSafely(BitArchiveReader& reader, const localfs::path& staging
     }
     for (const auto& [name, target] : links) validateLinkTarget(name, links);
     // 硬链接必须指向归档中的普通文件，选中链接时补齐其数据依赖。
+    auto canonicalName = [&](const std::string& name) {
+        const auto found = unicodePaths.find(normalizeUnicodeName(name, 2));
+        return found == unicodePaths.end() ? name : found->second;
+    };
     std::map<std::string, std::string> hardTargets;
     for (const auto& [name, target] : hardLinks) {
-        auto resolved = target;
+        auto resolved = canonicalName(target);
         std::set<std::string> visited{name};
         while (hardLinks.count(resolved)) {
             if (!visited.insert(resolved).second) throw std::runtime_error("硬链接存在循环");
-            resolved = hardLinks.at(resolved);
+            resolved = canonicalName(hardLinks.at(resolved));
         }
         const auto found = names.find(resolved);
         if (found == names.end() || found->second->isDir() || links.count(resolved)) {
@@ -758,7 +811,7 @@ static void extractSafely(BitArchiveReader& reader, const localfs::path& staging
     }
     for (const auto& [name, item] : names) {
         const auto target = appleDoubleTarget(name);
-        const auto found = names.find(target);
+        const auto found = names.find(canonicalName(target));
         if (found != names.end() && selected.count(found->second->index())) selected.insert(item->index());
     }
     for (const auto index : selected) if (index >= items.size()) throw std::runtime_error("无效的解压条目索引");
@@ -792,6 +845,58 @@ static void extractSafely(BitArchiveReader& reader, const localfs::path& staging
     for (const auto& item : items) {
         if (selected.count(item.index()) && localfs::symlink_status(staging / extractedPath(item)).type() != localfs::file_type::not_found) {
             permissions.remember(item, staging / extractedPath(item));
+        }
+    }
+}
+
+static void normalizeExtractedNames(const localfs::path& root, const std::vector<BitArchiveItemInfo>& items, Job* job) {
+    if (!job->filenameNormalization) return;
+    std::map<std::string, struct timespec> modifiedTimes;
+    for (const auto& item : items) {
+        if (!item.isDir() && !item.isSymLink()) continue;
+        const auto time = item.itemProperty(BitProperty::MTime);
+        if (!time.isFileTime()) continue;
+        const auto elapsed = time.getTimePoint().time_since_epoch();
+        const auto seconds = std::chrono::floor<std::chrono::seconds>(elapsed);
+        modifiedTimes[normalizeUnicodeName(extractedPath(item), 2)] = {
+            static_cast<time_t>(seconds.count()), static_cast<long>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed - seconds).count())};
+    }
+    struct Entry { localfs::path path; struct stat status; };
+    std::vector<Entry> entries;
+    for (const auto& entry : localfs::recursive_directory_iterator(root)) {
+        struct stat status{};
+        if (lstat(entry.path().c_str(), &status) != 0) throw std::runtime_error("无法读取待规范化项目");
+        const auto modified = modifiedTimes.find(normalizeUnicodeName(entry.path().lexically_relative(root).generic_string(), 2));
+        if (modified != modifiedTimes.end()) status.st_mtimespec = modified->second;
+        entries.push_back({entry.path(), status});
+    }
+    // 子项先改名，父目录随后改名，原有权限描述符仍指向同一个目录。
+    std::sort(entries.begin(), entries.end(), [](const auto& left, const auto& right) {
+        return std::distance(left.path.begin(), left.path.end()) > std::distance(right.path.begin(), right.path.end());
+    });
+    for (const auto& entry : entries) {
+        checkCancellation(job);
+        auto current = entry.path;
+        const auto normalized = normalizeUnicodeName(current.filename().string(), job->filenameNormalization);
+        if (normalized != current.filename().string()) {
+            const auto target = current.parent_path() / normalized;
+            // APFS 视规范等价拼写为同名，借助排他暂存移出后再发布新拼写。
+            StagingDirectory holding(current.parent_path());
+            publish(current, holding.path / "item");
+            publish(holding.path / "item", target);
+            current = target;
+        }
+        if (S_ISLNK(entry.status.st_mode)) {
+            const auto target = localfs::read_symlink(current).generic_string();
+            const auto normalizedTarget = normalizeUnicodeName(target, job->filenameNormalization);
+            if (normalizedTarget != target) {
+                localfs::remove(current);
+                localfs::create_symlink(normalizedTarget, current);
+            }
+        }
+        if (S_ISDIR(entry.status.st_mode) || S_ISLNK(entry.status.st_mode)) {
+            const struct timespec times[] = {entry.status.st_atimespec, entry.status.st_mtimespec};
+            if (utimensat(AT_FDCWD, current.c_str(), times, AT_SYMLINK_NOFOLLOW) != 0) throw std::runtime_error("无法恢复规范化项目的时间");
         }
     }
 }
@@ -1271,6 +1376,10 @@ extern "C" {
 __attribute__((visibility("default"))) Job* f7_job_create() { return new Job(); }
 __attribute__((visibility("default"))) void f7_job_destroy(Job* job) { delete job; }
 __attribute__((visibility("default"))) void f7_job_cancel(Job* job) { job->cancelled = true; }
+__attribute__((visibility("default"))) void f7_job_filename_normalization(Job* job, uint32_t mode) {
+    job->filenameNormalization = mode;
+}
+
 __attribute__((visibility("default"))) void f7_job_codepage(Job* job, uint32_t codePage) {
     job->codePage = codePage;
 }
@@ -1310,6 +1419,7 @@ __attribute__((visibility("default"))) char* f7_run(
     bool multiVolume = false;
     try {
         checkCancellation(job);
+        if (job->filenameNormalization > 2) throw std::runtime_error("无效的 Unicode 文件名规范化选项");
         Bit7zLibrary library(engine);
         std::string op(operation);
         if (op == "compress") {
@@ -1354,7 +1464,8 @@ __attribute__((visibility("default"))) char* f7_run(
                 paths.push_back(source.string());
             }
             StagingDirectory staging(target.parent_path());
-            const auto packedInputs = singleFile ? std::vector<std::pair<std::string, std::string>>{} :
+            const auto packedInputs = singleFile ? std::vector<std::pair<std::string, std::string>>{
+                {paths.front(), normalizeUnicodeName(localfs::path(paths.front()).filename().string(), job->filenameNormalization)}} :
                 compressionInputs(paths, staging.path, tarStream || outputFormat == BitFormat::Tar, job);
             const bool sevenZip = outputFormat == BitFormat::SevenZip;
             BitFileCompressor compressor(library, outputFormat);
@@ -1376,7 +1487,7 @@ __attribute__((visibility("default"))) char* f7_run(
                 checkCancellation(job);
                 paths = {tar.string()};
             }
-            if (singleFile || tarStream) compressor.compress(paths, output.string());
+            if (tarStream) compressor.compress(paths, output.string());
             else compressInputs(compressor, packedInputs, output, job);
             checkCancellation(job);
             // 发布期间锁住目标目录，避免本程序并发创建的卷组交错。
@@ -1490,9 +1601,10 @@ __attribute__((visibility("default"))) char* f7_run(
         StagingDirectory staging(intoExisting ? target : target.parent_path());
         ExtractionPermissions permissions;
         extractSafely(reader, staging.path, indices, indexCount, job, permissions);
+        normalizeExtractedNames(staging.path, reader.items(), job);
         checkCancellation(job);
         if (volumeVersion(archive) != initialVolumes) throw std::runtime_error("解压期间压缩包或分卷已变化，请重新打开");
-        const auto root = exporting ? staging.path / job->exportPath :
+        const auto root = exporting ? staging.path / normalizeUnicodeName(job->exportPath, job->filenameNormalization) :
             extractionRoot(staging.path, op == "extractFlat" || op == "extractHereFlat" || op == "extractSmartFlat");
         if (exporting) {
             const auto type = localfs::symlink_status(root);

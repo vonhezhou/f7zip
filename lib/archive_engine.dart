@@ -6,6 +6,8 @@ import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 import 'package:path/path.dart' as p;
 
+import 'filename_normalization.dart';
+
 typedef _ExportOptionsNative = Void Function(
   Pointer<Void>,
   Pointer<Utf8>,
@@ -178,6 +180,7 @@ class ArchiveRequest {
     this.expectedVersion = '',
     this.password = '',
     this.codePage = 0,
+    this.filenameNormalization = FilenameNormalization.preserve,
     this.volumeSize = 0,
     this.extractionPolicy = ExtractionPolicy.fail,
     this.expectedDestinationVersion = '',
@@ -188,7 +191,10 @@ class ArchiveRequest {
     this.indices = const [],
   });
 
-  ArchiveRequest withPassword(String value) => ArchiveRequest(
+  ArchiveRequest withPassword(
+    String value, {
+    FilenameNormalization? filenameNormalization,
+  }) => ArchiveRequest(
     operation,
     archive,
     destination: destination,
@@ -197,6 +203,7 @@ class ArchiveRequest {
     expectedVersion: expectedVersion,
     password: value,
     codePage: codePage,
+    filenameNormalization: filenameNormalization ?? this.filenameNormalization,
     volumeSize: volumeSize,
     extractionPolicy: extractionPolicy,
     expectedDestinationVersion: expectedDestinationVersion,
@@ -215,6 +222,7 @@ class ArchiveRequest {
   final String expectedVersion;
   final String password;
   final int codePage;
+  final FilenameNormalization filenameNormalization;
   final int volumeSize;
   final ExtractionPolicy extractionPolicy;
   final String expectedDestinationVersion;
@@ -340,6 +348,9 @@ Map<String, dynamic> _execute(
       indices[i] = request.indices[i];
     }
     final job = Pointer<Void>.fromAddress(address);
+    library.lookupFunction<_CodePageNative, _CodePage>(
+      'f7_job_filename_normalization',
+    )(job, request.filenameNormalization.index);
     library.lookupFunction<_CodePageNative, _CodePage>('f7_job_codepage')(
       job,
       request.codePage,

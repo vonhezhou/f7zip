@@ -131,3 +131,16 @@ void ZipEncodingScope::detectArchive(const char* archive) {
     selected = detectZipCodePage(archive);
     setCodePage(selected);
 }
+
+std::string normalizeUnicodeName(const std::string& value, uint32_t mode) {
+    if (mode == 0) return value;
+    if (mode > 2) throw std::runtime_error("无效的 Unicode 文件名规范化选项");
+    if (std::all_of(value.begin(), value.end(), [](unsigned char byte) { return byte > 0 && byte < 128; })) return value;
+    @autoreleasepool {
+        if (value.find('\0') != std::string::npos) throw std::runtime_error("文件名包含空字符");
+        NSString* source = [NSString stringWithUTF8String:value.c_str()];
+        if (!source) throw std::runtime_error("文件名不是有效的 UTF-8，无法规范化");
+        NSString* normalized = mode == 1 ? source.precomposedStringWithCanonicalMapping : source.decomposedStringWithCanonicalMapping;
+        return std::string(normalized.UTF8String);
+    }
+}

@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import 'app_theme.dart';
 import 'filename_encoding.dart';
+import 'filename_normalization.dart';
 import 'compression_preset.dart';
 import 'password_manager.dart';
 
@@ -21,6 +22,7 @@ class AppSettings {
     this.themeMode = ThemeMode.system,
     this.colorTheme = AppColorTheme.purple,
     this.filenameEncoding = FilenameEncoding.autoDetect,
+    this.filenameNormalization = FilenameNormalization.preserve,
     this.compressionPresets = const [],
     this.defaultCompressionPreset = '',
   });
@@ -61,6 +63,10 @@ class AppSettings {
         (encoding) => encoding.name == json['filenameEncoding'],
         orElse: () => FilenameEncoding.autoDetect,
       ),
+      filenameNormalization: FilenameNormalization.values.firstWhere(
+        (mode) => mode.name == json['filenameNormalization'],
+        orElse: () => FilenameNormalization.preserve,
+      ),
       colorTheme: AppColorTheme.values.firstWhere(
         (theme) => theme.name == json['colorTheme'],
         orElse: () => AppColorTheme.purple,
@@ -86,6 +92,7 @@ class AppSettings {
     themeMode: themeMode,
     colorTheme: colorTheme,
     filenameEncoding: filenameEncoding,
+    filenameNormalization: filenameNormalization,
     compressionPresets: List.unmodifiable(presets),
     defaultCompressionPreset: defaultName,
   );
@@ -101,6 +108,7 @@ class AppSettings {
   final ThemeMode themeMode;
   final AppColorTheme colorTheme;
   final FilenameEncoding filenameEncoding;
+  final FilenameNormalization filenameNormalization;
 
   Map<String, dynamic> toJson() => {
     'compressionPresets': compressionPresets
@@ -118,6 +126,7 @@ class AppSettings {
     'themeMode': themeMode.name,
     'colorTheme': colorTheme.name,
     'filenameEncoding': filenameEncoding.name,
+    'filenameNormalization': filenameNormalization.name,
   };
 }
 
@@ -134,6 +143,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late ThemeMode _themeMode = widget.initial.themeMode;
   late AppColorTheme _colorTheme = widget.initial.colorTheme;
   late FilenameEncoding _filenameEncoding = widget.initial.filenameEncoding;
+  late FilenameNormalization _filenameNormalization =
+      widget.initial.filenameNormalization;
   late bool _alternateRows = widget.initial.alternateRows;
   late bool _singleClickOpen = widget.initial.singleClickOpen;
   late bool _showDotEntries = widget.initial.showDotEntries;
@@ -217,6 +228,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       themeMode: _themeMode,
       colorTheme: _colorTheme,
       filenameEncoding: _filenameEncoding,
+      filenameNormalization: _filenameNormalization,
       alternateRows: _alternateRows,
       singleClickOpen: _singleClickOpen,
       showDotEntries: _showDotEntries,
@@ -303,6 +315,32 @@ class _SettingsDialogState extends State<SettingsDialog> {
                                     setState(() => _themeMode = value);
                                   }
                                 },
+                              ),
+                            ),
+                            ListTile(
+                              title: const Text('创建与解压文件名规范化'),
+                              subtitle: const Text('规范等价拼写重名时停止操作，请调整名称后重试。'),
+                              trailing: DropdownButton<FilenameNormalization>(
+                                key: const ValueKey('filenameNormalization'),
+                                value: _filenameNormalization,
+                                items: [
+                                  for (final mode
+                                      in FilenameNormalization.values)
+                                    DropdownMenuItem(
+                                      value: mode,
+                                      child: Text(mode.label),
+                                    ),
+                                ],
+                                onChanged: _saving
+                                    ? null
+                                    : (value) {
+                                        if (value != null) {
+                                          setState(
+                                            () =>
+                                                _filenameNormalization = value,
+                                          );
+                                        }
+                                      },
                               ),
                             ),
                             ListTile(

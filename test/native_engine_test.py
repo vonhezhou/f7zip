@@ -25,6 +25,7 @@ LIB.f7_job_output_limit.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
 LIB.f7_job_export_options.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
 LIB.f7_job_extraction_options.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_char_p]
 LIB.f7_job_volume_size.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+LIB.f7_job_filename_normalization.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 LIB.f7_job_codepage.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 LIB.f7_free.argtypes = [ctypes.c_void_p]
 LIB.f7_run.restype = ctypes.c_void_p
@@ -33,9 +34,10 @@ LIB.f7_run.argtypes = [ctypes.c_void_p, *([ctypes.c_char_p] * 6), ctypes.c_int,
                       ctypes.POINTER(ctypes.c_uint32), ctypes.c_int]
 
 
-def execute(operation, archive, destination='', password='', format='zip', inputs=(), indices=(), job=None, code_page=0, volume_size=0, extraction_policy=0, expected_destination_version='', export_path='', export_version='', output_limit=0):
+def execute(operation, archive, destination='', password='', format='zip', inputs=(), indices=(), job=None, code_page=0, volume_size=0, extraction_policy=0, expected_destination_version='', export_path='', export_version='', output_limit=0, filename_normalization=0):
     owned = job is None
     job = LIB.f7_job_create() if owned else job
+    LIB.f7_job_filename_normalization(job, filename_normalization)
     LIB.f7_job_output_limit(job, output_limit)
     LIB.f7_job_export_options(job, export_path.encode(), export_version.encode())
     LIB.f7_job_extraction_options(job, extraction_policy, expected_destination_version.encode())

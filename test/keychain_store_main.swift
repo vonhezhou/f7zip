@@ -55,6 +55,12 @@ struct StoreTest {
     }
     stage("lock")
     try require(SecKeychainLock(keychain) == errSecSuccess, "lock")
+    var lockedStatus: SecKeychainStatus = 0
+    try require(SecKeychainGetStatus(keychain, &lockedStatus) == errSecSuccess && lockedStatus & UInt32(kSecUnlockStateStatus) == 0, "locked status")
+    do {
+      _ = try store.names()
+      throw TestFailure(message: "locked metadata query must fail immediately")
+    } catch ArchivePasswordStore.StoreError.keychain(errSecInteractionNotAllowed) {}
     // 锁定时允许返回空候选或明确失败，操作须在无交互模式下结束。
     do { try require(try store.candidates().isEmpty, "locked keychain yields no secret") }
     catch is ArchivePasswordStore.StoreError {}

@@ -11,15 +11,30 @@ final class ArchivePasswordStore {
     self.keychain = keychain
   }
 
-  private func query(_ name: String? = nil) -> [String: Any] {
+  private func storageKeychain() throws -> SecKeychain {
+    if let keychain = keychain { return keychain }
+    var current: SecKeychain?
+    try check(SecKeychainCopyDefault(&current))
+    guard let current = current else { throw StoreError.keychain(errSecNoDefaultKeychain) }
+    return current
+  }
+
+  private func requireUnlocked() throws {
+    var status: SecKeychainStatus = 0
+    try check(SecKeychainGetStatus(try storageKeychain(), &status))
+    guard status & UInt32(kSecUnlockStateStatus) != 0 else { throw StoreError.keychain(errSecInteractionNotAllowed) }
+  }
+
+  private func query(_ name: String? = nil) throws -> [String: Any] {
     var value: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service]
     if let name = name { value[kSecAttrAccount as String] = name }
-    if let keychain = keychain { value[kSecMatchSearchList as String] = [keychain] }
+    value[kSecMatchSearchList as String] = [try storageKeychain()]
     return value
   }
 
   func names() throws -> [String] {
-    var value = query()
+    try requireUnlocked()
+    var value = try query()
     value[kSecReturnAttributes as String] = true
     value[kSecMatchLimit as String] = kSecMatchLimitAll
     let context = LAContext()
@@ -42,12 +57,12 @@ final class ArchivePasswordStore {
     }
     let data = Data(password.utf8)
     if replace {
-      try check(SecItemUpdate(query(normalized) as CFDictionary, [kSecValueData as String: data] as CFDictionary))
+      try check(SecItemUpdate(try query(normalized) as CFDictionary, [kSecValueData as String: data] as CFDictionary))
     } else {
       guard try names().count < 20 else { throw StoreError.tooManyItems }
-      var value = query(normalized)
+      var value = try query(normalized)
       value.removeValue(forKey: kSecMatchSearchList as String)
-      if let keychain = keychain { value[kSecUseKeychain as String] = keychain }
+      value[kSecUseKeychain as String] = try storageKeychain()
       value[kSecAttrLabel as String] = normalized
       value[kSecValueData as String] = data
       value[kSecAttrSynchronizable as String] = false
@@ -56,14 +71,15 @@ final class ArchivePasswordStore {
   }
 
   func delete(name: String) throws {
-    let status = SecItemDelete(query(name) as CFDictionary)
+    let status = SecItemDelete(try query(name) as CFDictionary)
     if status != errSecItemNotFound { try check(status) }
   }
 
   func candidates() throws -> [String] {
     var passwords = [String]()
     for name in try names().prefix(20) {
-      var value = query(name)
+      try requireUnlocked()
+      var value = try query(name)
       value[kSecReturnData as String] = true
       value[kSecMatchLimit as String] = kSecMatchLimitOne
       // 自动尝试时跳过需要系统交互的条目，继续使用常规密码输入流程。

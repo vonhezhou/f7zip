@@ -1081,12 +1081,28 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   Future<bool> _extract({
     bool selectedOnly = false,
     bool besideArchive = false,
+    bool trashSource = false,
   }) async {
     final archive = _archive;
     if (!_interactive ||
         archive == null ||
         (selectedOnly && _selected.isEmpty)) {
       return false;
+    }
+    if (trashSource) {
+      if (selectedOnly ||
+          _archiveParents.isNotEmpty ||
+          (_edits?.sessions.any((session) => session.archive == archive) ??
+              false)) {
+        await _error('请先结束此压缩包的外部编辑监控，并在顶层归档执行完整解压。');
+        return false;
+      }
+      if (!await _confirm(
+        '解压成功后移至废纸篓？',
+        '完整解压成功后，将把 ${p.basename(archive)} 移至 macOS 废纸篓。跳过同名文件、分卷、失败或取消时保留源包。',
+      )) {
+        return false;
+      }
     }
     var password = _password;
     if (password.isEmpty && _entries.any((entry) => entry.encrypted)) {
@@ -1110,6 +1126,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               .map((entry) => entry.index)
               .toList()
         : <int>[];
+    setState(() => _mutating = true);
     try {
       final result = await _runExtraction(
         archive,
@@ -1126,11 +1143,41 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           _lastOutput = result['path'] as String;
           _status = '解压完成 · $_lastOutput';
         });
+        if (trashSource) {
+          if (result['complete'] != true) {
+            setState(() => _status = '解压完成，已保留源包（跳过同名文件或分卷归档） · $_lastOutput');
+          } else {
+            try {
+              final recycled = await _run(
+                '移至废纸篓',
+                ArchiveRequest(
+                  'trash',
+                  archive,
+                  expectedVersion: result['version'] as String,
+                ),
+              );
+              if (recycled != null && mounted) {
+                setState(() => _status = '解压完成，原包已移至废纸篓 · $_lastOutput');
+                _mutating = false;
+                _closeArchive();
+              } else if (mounted) {
+                setState(() => _status = '解压完成，已保留源包 · $_lastOutput');
+              }
+            } catch (error) {
+              if (mounted) {
+                setState(() => _status = '解压完成，源包回收未完成 · $_lastOutput');
+              }
+              await _error('解压结果已保存。源包移至废纸篓失败，请核对后手动处理。\n$error');
+            }
+          }
+        }
       }
       return result != null;
     } catch (error) {
       await _error(error);
       return false;
+    } finally {
+      if (mounted) setState(() => _mutating = false);
     }
   }
 
@@ -1757,6 +1804,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         break;
       case 'extract':
         await _extract();
+        break;
+      case 'extractTrash':
+        await _extract(trashSource: true);
         break;
       case 'remove':
         await _removeSelected();
@@ -2971,6 +3021,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               value: 'quick',
               enabled: _archive != null,
               child: const Text('快速解压到同级目录'),
+            ),
+            PopupMenuItem(
+              value: 'extractTrash',
+              enabled: _archive != null && _archiveParents.isEmpty,
+              child: const Text('解压后移至废纸篓…'),
             ),
             PopupMenuItem(
               value: 'selected',

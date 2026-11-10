@@ -1422,6 +1422,39 @@ __attribute__((visibility("default"))) char* f7_run(
         if (job->filenameNormalization > 2) throw std::runtime_error("无效的 Unicode 文件名规范化选项");
         Bit7zLibrary library(engine);
         std::string op(operation);
+        if (op == "trash") {
+            if (!localfs::is_regular_file(localfs::symlink_status(archive))) throw std::runtime_error("符号链接来源保留原包，请在 Finder 中处理");
+            const auto source = localfs::canonical(archive);
+            ArchiveLock lock(source.c_str());
+            if (job->exportVersion.empty() || archiveVersion(source.c_str()) != job->exportVersion) {
+                throw std::runtime_error("源压缩包已发生变化，已保留源文件");
+            }
+            struct stat before{};
+            if (fstat(lock.descriptor, &before) != 0) throw std::runtime_error("无法检查源文件，已保留原包");
+            StagingDirectory holding(source.parent_path());
+            const auto reserved = holding.path / source.filename();
+            checkCancellation(job);
+            if (archiveVersion(source.c_str()) != job->exportVersion) throw std::runtime_error("源压缩包已发生变化，已保留源文件");
+            publish(source, reserved);
+            try {
+                struct stat after{};
+                if (lstat(reserved.c_str(), &after) != 0 || before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
+                    before.st_size != after.st_size || before.st_mtimespec.tv_sec != after.st_mtimespec.tv_sec ||
+                    before.st_mtimespec.tv_nsec != after.st_mtimespec.tv_nsec) {
+                    throw std::runtime_error("回收期间源文件发生变化，已停止处理");
+                }
+                checkCancellation(job);
+                const auto trashed = moveArchiveToTrash(reserved.string());
+                return result("{\"ok\":true,\"path\":" + quote(trashed) + "}");
+            } catch (...) {
+                // 排他恢复原位置，外部新建同名文件时保留私有目录中的源包。
+                if (renamex_np(reserved.c_str(), source.c_str(), RENAME_EXCL) != 0) {
+                    holding.preserve = true;
+                    throw std::runtime_error("源文件未能移至废纸篓，恢复位置被占用。原包保留于 " + reserved.string());
+                }
+                throw;
+            }
+        }
         if (op == "compress") {
             if (inputCount <= 0) throw std::runtime_error("请选择需要压缩的文件或文件夹");
             localfs::path target = localfs::absolute(archive);
@@ -1658,7 +1691,8 @@ __attribute__((visibility("default"))) char* f7_run(
             if (root == staging.path) staging.preserve = true;
         }
         permissions.commit();
-        return result("{\"ok\":true,\"version\":" + quote(readVersion) + ",\"path\":" + quote(resultPath.string()) + "}");
+        return result("{\"ok\":true,\"complete\":" + std::string(indexCount == 0 && job->extractionPolicy != 1 && !multiVolume ? "true" : "false") +
+            ",\"version\":" + quote(readVersion) + ",\"path\":" + quote(resultPath.string()) + "}");
     } catch (const ExtractionConflict& conflict) {
         std::string paths = "[";
         for (const auto& path : conflict.paths) { if (paths.size() > 1) paths += ','; paths += quote(path); }

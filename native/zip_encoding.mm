@@ -144,3 +144,15 @@ std::string normalizeUnicodeName(const std::string& value, uint32_t mode) {
         return std::string(normalized.UTF8String);
     }
 }
+
+std::string moveArchiveToTrash(const std::string& path) {
+    @autoreleasepool {
+        NSURL* source = [NSURL fileURLWithFileSystemRepresentation:path.c_str() isDirectory:NO relativeToURL:nil];
+        NSURL* trashed = nil;
+        NSError* error = nil;
+        if (![[NSFileManager defaultManager] trashItemAtURL:source resultingItemURL:&trashed error:&error]) {
+            throw std::runtime_error(std::string("无法移至废纸篓。") + (error.localizedDescription.UTF8String ?: "系统回收失败"));
+        }
+        return trashed ? std::string(trashed.fileSystemRepresentation) : std::string();
+    }
+}

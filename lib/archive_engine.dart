@@ -368,7 +368,7 @@ Map<String, dynamic> _execute(
     library.lookupFunction<_VolumeSizeNative, _VolumeSize>(
       'f7_job_output_limit',
     )(job, request.outputLimit);
-    if (request.operation == 'export') {
+    if (request.operation == 'export' || request.operation == 'trash') {
       library.lookupFunction<_ExportOptionsNative, _ExportOptions>(
         'f7_job_export_options',
       )(job, utf8(request.itemPath), utf8(request.expectedVersion));

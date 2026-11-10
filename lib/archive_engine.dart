@@ -183,6 +183,7 @@ class ArchiveRequest {
     this.expectedDestinationVersion = '',
     this.format = 'zip',
     this.level = 5,
+    this.outputLimit = 0,
     this.inputs = const [],
     this.indices = const [],
   });
@@ -200,6 +201,7 @@ class ArchiveRequest {
   final String expectedDestinationVersion;
   final String format;
   final int level;
+  final int outputLimit;
   final List<String> inputs;
   final List<int> indices;
 }
@@ -257,6 +259,7 @@ class ArchiveEngine {
 
   Future<Map<String, dynamic>> run(ArchiveRequest request) async {
     if (_job != null) throw const ArchiveFailure('已有任务正在运行');
+    if (request.outputLimit < 0) throw const ArchiveFailure('输出资源上限无效');
     final job = _create();
     _job = job;
     final address = job.address;
@@ -332,6 +335,9 @@ Map<String, dynamic> _execute(
       request.extractionPolicy.index,
       utf8(request.expectedDestinationVersion),
     );
+    library.lookupFunction<_VolumeSizeNative, _VolumeSize>(
+      'f7_job_output_limit',
+    )(job, request.outputLimit);
     if (request.operation == 'export') {
       library.lookupFunction<_ExportOptionsNative, _ExportOptions>(
         'f7_job_export_options',

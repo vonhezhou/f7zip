@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 
 import 'archive_engine.dart';
 import 'archive_drag.dart';
+import 'archive_preview.dart';
 import 'archive_tree.dart';
 import 'app_settings.dart';
 import 'edit_workspace.dart';
@@ -110,6 +111,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   String? _activeDragId;
   int _pendingDragWrites = 0;
   bool _exportingDrag = false;
+  final Map<String, String> _previewDirectories = {};
 
   bool get _engineAvailable =>
       _desktopReady && !_busy && !_choosing && _engine != null;
@@ -126,6 +128,10 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       _engineError = '$error';
     }
     _desktop.setMethodCallHandler((call) async {
+      if (call.method == 'archivePreviewClosed') {
+        final arguments = call.arguments as Map;
+        await _releasePreview(arguments['id'] as String);
+      }
       if (call.method == 'writeArchivePromise') {
         return _writeArchivePromise(call.arguments as Map);
       }
@@ -205,6 +211,21 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       session.expiry?.cancel();
     }
     _dragSessions.clear();
+    final previews = Map<String, String>.from(_previewDirectories);
+    _previewDirectories.clear();
+    unawaited(
+      _desktop
+          .invokeMethod<void>('closeArchivePreviews', previews.keys.toList())
+          .then((_) async {
+            for (final directory in previews.values) {
+              await _desktop.invokeMethod<void>(
+                'discardArchivePreviewDirectory',
+                directory,
+              );
+            }
+          })
+          .catchError((Object error) {}),
+    );
     _search.dispose();
     _fileList.dispose();
     _desktop.setMethodCallHandler(null);
@@ -1292,6 +1313,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       case 'test':
         await _test();
         break;
+      case 'preview':
+        if (_selectedFile != null) await _previewFile(_selectedFile!);
+        break;
       case 'view':
         if (_selectedFile != null) await _openFile(_selectedFile!);
         break;
@@ -1406,6 +1430,119 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       }
     }
     return null;
+  }
+
+  bool get _canPreview {
+    final entry = _selectedFile;
+    return _interactive &&
+        entry != null &&
+        ArchivePreviewKind.forPath(entry.normalizedPath) != null;
+  }
+
+  Future<void> _releasePreview(String id) async {
+    final directory = _previewDirectories[id];
+    if (directory == null) return;
+    try {
+      await _desktop.invokeMethod<void>(
+        'discardArchivePreviewDirectory',
+        directory,
+      );
+      if (mounted) {
+        setState(() => _previewDirectories.remove(id));
+      } else {
+        _previewDirectories.remove(id);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _workspaceError = '预览暂存清理失败。$directory\n$error');
+      }
+    }
+  }
+
+  Future<void> _previewFile(ArchiveEntry entry) async {
+    final archive = _archive;
+    final kind = ArchivePreviewKind.forPath(entry.normalizedPath);
+    if (!_interactive || archive == null || kind == null) return;
+    if (_previewDirectories.length >= 2) {
+      await _error(const ArchiveFailure('最多同时打开两个预览，请先关闭已有预览'));
+      return;
+    }
+    if (entry.size > kind.outputLimit) {
+      await _error(
+        ArchiveFailure('文件超过 ${kind.outputLimit ~/ 1048576} MiB 预览上限'),
+      );
+      return;
+    }
+    final id = '${DateTime.now().microsecondsSinceEpoch}';
+    final version = _archiveVersion;
+    final codePage = _archiveCodePage;
+    var password = _password;
+    var opened = false;
+    Object? failure;
+    _openingFile = true;
+    try {
+      if (entry.encrypted && password.isEmpty) {
+        final value = await _askPassword();
+        if (value == null || !mounted) return;
+        password = value;
+      }
+      final directory = await _desktop.invokeMethod<String>(
+        'createArchivePreviewDirectory',
+      );
+      if (directory == null) throw const ArchiveFailure('无法创建预览暂存目录');
+      _previewDirectories[id] = directory;
+      if (!mounted) return;
+      final file = p.join(directory, kind.outputName(entry.normalizedPath));
+      while (mounted) {
+        try {
+          final result = await _run(
+            '准备预览',
+            ArchiveRequest(
+              'export',
+              archive,
+              destination: file,
+              itemPath: entry.normalizedPath,
+              expectedVersion: version,
+              codePage: codePage,
+              password: password,
+              indices: [entry.index],
+              outputLimit: kind.outputLimit,
+            ),
+          );
+          if (result == null || !mounted) return;
+          break;
+        } on ArchiveFailure catch (error) {
+          if (!error.passwordRequired) rethrow;
+          final value = await _askPassword(error: error.message);
+          if (value == null || !mounted) return;
+          password = value;
+        }
+      }
+      if (!mounted) return;
+      await _desktop.invokeMethod<void>('showArchivePreview', {
+        'id': id,
+        'path': file,
+        'directory': directory,
+        'kind': kind.name,
+        'title': entry.normalizedPath,
+      });
+      opened = true;
+      if (mounted) {
+        setState(() {
+          _status = '正在预览 · ${entry.normalizedPath}';
+          if (_archive == archive && _archiveVersion == version) {
+            _password = password;
+          }
+        });
+      }
+    } catch (error) {
+      failure = error;
+    } finally {
+      if (!opened) await _releasePreview(id);
+      _openingFile = false;
+      if (mounted) setState(() {});
+    }
+    if (failure != null && mounted) await _error(failure);
   }
 
   Future<void> _showSettings() async {
@@ -1581,6 +1718,12 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       ),
       items: [
         PopupMenuItem(value: 'open', child: Text(row.directory ? '打开' : '查看')),
+        if (!row.directory && row.entry != null)
+          PopupMenuItem(
+            value: 'preview',
+            enabled: ArchivePreviewKind.forPath(row.path) != null,
+            child: const Text('内置预览'),
+          ),
         if (!row.directory)
           PopupMenuItem(
             value: 'edit',
@@ -1616,6 +1759,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     );
     if (!mounted || !_available) return;
     switch (action) {
+      case 'preview':
+        if (row.entry != null) await _previewFile(row.entry!);
+        break;
       case 'open':
         _activateRow(row);
         break;
@@ -1847,6 +1993,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       'mkdir': _interactive && _editable && archive != null,
       'remove': _interactive && _editable && _selected.isNotEmpty,
       'rename': _interactive && _editable && _selected.length == 1,
+      'preview': _canPreview,
       'view': _interactive && _selectedFile != null,
       'edit': _interactive && _editable && _selectedFile != null,
       'properties': _interactive && archive != null,
@@ -2048,6 +2195,13 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           _interactive && _archive != null ? _test : null,
         ),
         const SizedBox(height: 26, child: VerticalDivider(width: 16)),
+        if (MediaQuery.sizeOf(context).width >= 940)
+          _tool(
+            Icons.preview_outlined,
+            '预览',
+            '内置预览',
+            _canPreview ? () => _previewFile(_selectedFile!) : null,
+          ),
         _tool(
           Icons.visibility_outlined,
           '查看',
@@ -2123,6 +2277,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
             }
           },
           itemBuilder: (_) => [
+            PopupMenuItem(
+              value: 'preview',
+              enabled: _canPreview,
+              child: const Text('内置预览'),
+            ),
             PopupMenuItem(
               value: 'quick',
               enabled: _archive != null,

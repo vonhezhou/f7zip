@@ -1,6 +1,9 @@
 import Cocoa
 import FlutterMacOS
 import UniformTypeIdentifiers
+import QuickLookUI
+import PDFKit
+import ImageIO
 
 class MainFlutterWindow: NSWindow {
   private var channel: FlutterMethodChannel?
@@ -8,6 +11,9 @@ class MainFlutterWindow: NSWindow {
   private var dragSources: [String: ArchiveFileDragSource] = [:]
   private var dragEventMonitor: Any?
   private var lastDragEvent: NSEvent?
+  private var previewDirectories = Set<URL>()
+  private var archivePreviews: [String: ArchivePreviewWindowController] = [:]
+  private var previewTerminationObserver: NSObjectProtocol?
 
   override func awakeFromNib() {
     (NSApp.delegate as? AppDelegate)?.archiveWindow = self
@@ -22,8 +28,23 @@ class MainFlutterWindow: NSWindow {
     RegisterGeneratedPlugins(registry: controller)
     let bridge = FlutterMethodChannel(name: "sevenzip/desktop", binaryMessenger: controller.engine.binaryMessenger)
     channel = bridge
+    previewTerminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+      self?.cleanupArchivePreviews()
+    }
     bridge.setMethodCallHandler { call, result in
       switch call.method {
+      case "createArchivePreviewDirectory":
+        self.createArchivePreviewDirectory(result: result)
+      case "discardArchivePreviewDirectory":
+        do {
+          if let path = call.arguments as? String { try self.discardArchivePreviewDirectory(URL(fileURLWithPath: path, isDirectory: true)) }
+          result(nil)
+        } catch { result(FlutterError(code: "preview", message: error.localizedDescription, details: nil)) }
+      case "showArchivePreview":
+        self.showArchivePreview(call.arguments as? [String: String] ?? [:], result: result)
+      case "closeArchivePreviews":
+        self.closeArchivePreviews(call.arguments as? [String] ?? [])
+        result(nil)
       case "startArchiveDrag":
         self.startArchiveDrag(call.arguments as? [String: Any] ?? [:], view: controller.view, result: result)
       case "finderPassword":
@@ -180,7 +201,93 @@ class MainFlutterWindow: NSWindow {
   private let associationExtensions = ["zip", "7z", "rar", "tar", "gz", "xz", "bz2", "iso", "tgz", "tbz", "tbz2", "txz", "001", "z01", "r00", "zst", "cab", "dmg", "wim", "jar", "apk"]
 
   deinit {
+    if let observer = previewTerminationObserver { NotificationCenter.default.removeObserver(observer) }
     if let monitor = dragEventMonitor { NSEvent.removeMonitor(monitor) }
+  }
+
+  private func createArchivePreviewDirectory(result: @escaping FlutterResult) {
+    guard previewDirectories.count < 2 else {
+      result(FlutterError(code: "preview", message: "最多同时打开两个预览，请先关闭已有预览", details: nil))
+      return
+    }
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("f7zip-preview-" + UUID().uuidString, isDirectory: true)
+    do {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+      previewDirectories.insert(directory)
+      result(directory.path)
+    } catch { result(FlutterError(code: "preview", message: error.localizedDescription, details: nil)) }
+  }
+
+  private func discardArchivePreviewDirectory(_ directory: URL) throws {
+    guard previewDirectories.contains(directory) else { return }
+    if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
+    previewDirectories.remove(directory)
+  }
+
+  private func showArchivePreview(_ arguments: [String: String], result: @escaping FlutterResult) {
+    guard let id = arguments["id"], let path = arguments["path"], let root = arguments["directory"],
+          let kind = arguments["kind"], let title = arguments["title"], archivePreviews[id] == nil else {
+      result(FlutterError(code: "preview", message: "预览请求无效", details: nil))
+      return
+    }
+    let directory = URL(fileURLWithPath: root, isDirectory: true)
+    let file = URL(fileURLWithPath: path)
+    guard previewDirectories.contains(directory), file.deletingLastPathComponent() == directory else {
+      result(FlutterError(code: "preview", message: "预览文件不在已登记的暂存目录", details: nil))
+      return
+    }
+    do {
+      let attributes = try FileManager.default.attributesOfItem(atPath: path)
+      guard attributes[.type] as? FileAttributeType == .typeRegular else { throw ArchivePreviewError.invalidFile }
+      let limit = kind == "text" ? 4 * 1024 * 1024 : 256 * 1024 * 1024
+      guard let size = attributes[.size] as? NSNumber, size.uint64Value <= UInt64(limit) else { throw ArchivePreviewError.resourceLimit }
+      try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+      if kind == "image" { try validatePreviewImage(file) }
+      if kind == "pdf" {
+        guard let document = PDFDocument(url: file) else { throw ArchivePreviewError.invalidFile }
+        guard document.pageCount <= 1000 else { throw ArchivePreviewError.resourceLimit }
+      }
+      guard ["text", "image", "pdf", "audio", "video"].contains(kind),
+            let controller = ArchivePreviewWindowController(file: file, title: title) else { throw ArchivePreviewError.invalidFile }
+      controller.onClosed = { [weak self] in
+        guard let self = self else { return }
+        self.archivePreviews.removeValue(forKey: id)
+        var response = ["id": id]
+        do { try self.discardArchivePreviewDirectory(directory) }
+        catch { response["error"] = error.localizedDescription }
+        self.channel?.invokeMethod("archivePreviewClosed", arguments: response)
+      }
+      archivePreviews[id] = controller
+      controller.showWindow(nil)
+      controller.window?.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+      result(nil)
+    } catch { result(FlutterError(code: "preview", message: error.localizedDescription, details: nil)) }
+  }
+
+  private func validatePreviewImage(_ file: URL) throws {
+    guard let source = CGImageSourceCreateWithURL(file as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { throw ArchivePreviewError.invalidFile }
+    let count = CGImageSourceGetCount(source)
+    guard count > 0 && count <= 512 else { throw ArchivePreviewError.resourceLimit }
+    var pixels: UInt64 = 0
+    for index in 0..<count {
+      guard let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
+            let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+            let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else { throw ArchivePreviewError.invalidFile }
+      let w = width.uint64Value, h = height.uint64Value
+      guard w > 0 && h > 0 && w <= 16384 && h <= 16384 && w * h <= 40_000_000 else { throw ArchivePreviewError.resourceLimit }
+      pixels += w * h
+      guard pixels <= 80_000_000 else { throw ArchivePreviewError.resourceLimit }
+    }
+  }
+
+  private func closeArchivePreviews(_ ids: [String]) {
+    for id in ids { archivePreviews[id]?.close() }
+  }
+
+  private func cleanupArchivePreviews() {
+    closeArchivePreviews(Array(archivePreviews.keys))
+    for directory in Array(previewDirectories) { try? discardArchivePreviewDirectory(directory) }
   }
 
   private func startArchiveDrag(_ arguments: [String: Any], view: NSView, result: @escaping FlutterResult) {
@@ -334,7 +441,8 @@ private class ArchiveMenuTarget: NSObject, NSMenuItemValidation {
       view.insertItem(item("文件树", "tree"), at: 0)
       view.insertItem(item("后退", "back", "["), at: 1)
       view.insertItem(item("前进", "forward", "]"), at: 2)
-      view.insertItem(item("查看文件", "view"), at: 3)
+      view.insertItem(item("内置预览", "preview"), at: 3)
+      view.insertItem(item("查看文件", "view"), at: 4)
       view.insertItem(.separator(), at: 4)
     }
     updateRecent(UserDefaults.standard.stringArray(forKey: "recentArchives") ?? [])
@@ -443,5 +551,51 @@ private class ArchiveFileDragSource: NSObject, NSDraggingSource, NSFilePromisePr
       if self.pending > 0 { self.scheduleExpiry() }
       else { self.onFinished?() }
     }
+  }
+}
+
+private enum ArchivePreviewError: LocalizedError {
+  case invalidFile
+  case resourceLimit
+  var errorDescription: String? {
+    switch self {
+    case .invalidFile: return "文件损坏或当前预览组件无法读取"
+    case .resourceLimit: return "文件超过预览资源上限"
+    }
+  }
+}
+
+private class ArchivePreviewItem: NSObject, QLPreviewItem {
+  let previewItemURL: URL?
+  let previewItemTitle: String?
+  init(file: URL, title: String) { previewItemURL = file; previewItemTitle = title }
+}
+
+private class ArchivePreviewWindowController: NSWindowController, NSWindowDelegate {
+  private let preview: QLPreviewView
+  var onClosed: (() -> Void)?
+
+  init?(file: URL, title: String) {
+    let frame = NSRect(x: 0, y: 0, width: 760, height: 560)
+    guard let preview = QLPreviewView(frame: frame, style: .normal) else { return nil }
+    self.preview = preview
+    let window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+    super.init(window: window)
+    window.title = title + " — 内置预览"
+    window.minSize = NSSize(width: 420, height: 320)
+    window.isReleasedWhenClosed = false
+    window.contentView = preview
+    window.delegate = self
+    preview.autostarts = false
+    preview.shouldCloseWithWindow = false
+    preview.previewItem = ArchivePreviewItem(file: file, title: title)
+    window.center()
+  }
+
+  required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+  func windowWillClose(_ notification: Notification) {
+    preview.close()
+    onClosed?()
   }
 }

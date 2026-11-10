@@ -45,6 +45,8 @@ struct Job {
     std::string expectedDestinationVersion;
     std::string exportPath;
     std::string exportVersion;
+    uint64_t outputLimit = 0;
+    std::atomic<bool> limitExceeded{false};
     std::atomic<uint64_t> total{0};
     std::atomic<uint64_t> completed{0};
     std::atomic<bool> cancelled{false};
@@ -71,11 +73,24 @@ static void checkCancellation(Job* job) {
     if (job->cancelled.load()) throw std::runtime_error("操作已取消");
 }
 
+static void checkOutputBudget(uint64_t size, uint64_t& total, Job* job) {
+    if (!job->outputLimit) return;
+    if (size > job->outputLimit - total) {
+        job->limitExceeded = true;
+        throw std::runtime_error("预览内容超过资源上限，请缩小选中范围或直接解压");
+    }
+    total += size;
+}
+
 static void callbacks(BitAbstractArchiveHandler& handler, Job* job) {
-    handler.setTotalCallback([job](uint64_t total) { job->total = total; });
+    handler.setTotalCallback([job](uint64_t total) {
+        job->total = total;
+        if (job->outputLimit && total > job->outputLimit) job->limitExceeded = true;
+    });
     handler.setProgressCallback([job](uint64_t value) {
         job->completed = value;
-        return !job->cancelled.load();
+        if (job->outputLimit && value > job->outputLimit) job->limitExceeded = true;
+        return !job->cancelled.load() && !job->limitExceeded.load();
     });
     handler.setFileCallback([job](const std::string& name) {
         std::lock_guard<std::mutex> guard(job->mutex);
@@ -275,7 +290,11 @@ static std::string volumeVersion(const char* archive) {
 
 static localfs::path unpackSingleArchive(BitArchiveReader& reader, Job* job,
     std::vector<std::unique_ptr<StagingDirectory>>& intermediates) {
-    for (const auto& item : reader.items()) validateEntry(item);
+    uint64_t total = 0;
+    for (const auto& item : reader.items()) {
+        validateEntry(item);
+        checkOutputBudget(item.size(), total, job);
+    }
     intermediates.push_back(std::make_unique<StagingDirectory>(localfs::temp_directory_path()));
     const auto& directory = intermediates.back()->path;
     reader.extractTo(directory.string());
@@ -286,6 +305,8 @@ static localfs::path unpackSingleArchive(BitArchiveReader& reader, Job* job,
     if (!localfs::is_regular_file(localfs::symlink_status(inner)) || ++contents != localfs::directory_iterator()) {
         throw std::runtime_error("归档需要包含唯一的内层文件");
     }
+    total = 0;
+    checkOutputBudget(localfs::file_size(inner), total, job);
     return inner;
 }
 
@@ -735,12 +756,20 @@ static void extractSafely(BitArchiveReader& reader, const localfs::path& staging
         if (found != names.end() && selected.count(found->second->index())) selected.insert(item->index());
     }
     for (const auto index : selected) if (index >= items.size()) throw std::runtime_error("无效的解压条目索引");
+    uint64_t total = 0;
     std::vector<uint32_t> regular;
     for (const auto& item : items) {
+        if (selected.count(item.index())) checkOutputBudget(item.size(), total, job);
         const auto name = extractedPath(item);
         if (selected.count(item.index()) && !links.count(name) && !hardLinks.count(name)) regular.push_back(item.index());
     }
     if (!regular.empty()) reader.extractTo(staging.string(), regular);
+    if (job->outputLimit) {
+        total = 0;
+        for (const auto& entry : localfs::recursive_directory_iterator(staging)) {
+            if (entry.is_regular_file()) checkOutputBudget(entry.file_size(), total, job);
+        }
+    }
     for (const auto& [name, target] : hardTargets) {
         if (!selected.count(names.at(name)->index())) continue;
         checkCancellation(job);
@@ -1249,6 +1278,10 @@ __attribute__((visibility("default"))) void f7_job_extraction_options(Job* job, 
     job->expectedDestinationVersion = expectedVersion;
 }
 
+__attribute__((visibility("default"))) void f7_job_output_limit(Job* job, uint64_t bytes) {
+    job->outputLimit = bytes;
+}
+
 __attribute__((visibility("default"))) void f7_job_export_options(Job* job, const char* path, const char* version) {
     job->exportPath = path;
     job->exportVersion = version;
@@ -1498,8 +1531,8 @@ __attribute__((visibility("default"))) char* f7_run(
         return result("{\"ok\":false,\"error\":" + quote(conflict.what()) + ",\"destinationVersion\":" + quote(conflict.version) + ",\"conflicts\":" + paths + "]}");
     } catch (const BitException& error) {
         const bool passwordRequired = error.code() == BitFailureSource::WrongPassword;
-        const auto message = multiVolume && !passwordRequired
-            ? std::string("分卷缺失、顺序错误或损坏。") + error.what() : error.what();
+        const auto message = job->limitExceeded.load() ? std::string("预览内容超过资源上限，请缩小选中范围或直接解压") :
+            multiVolume && !passwordRequired ? std::string("分卷缺失、顺序错误或损坏。") + error.what() : error.what();
         return result("{\"ok\":false,\"cancelled\":" + std::string(job->cancelled ? "true" : "false") +
             ",\"passwordRequired\":" + (passwordRequired ? "true" : "false") + ",\"volumeError\":" + (multiVolume ? "true" : "false") + ",\"error\":" + quote(message) + "}");
     } catch (const std::exception& error) {

@@ -147,6 +147,7 @@ class ArchiveRequest {
     this.operation,
     this.archive, {
     this.destination = '',
+    this.removeRedundantRoot = false,
     this.itemPath = '',
     this.expectedVersion = '',
     this.password = '',
@@ -159,6 +160,7 @@ class ArchiveRequest {
   final String operation;
   final String archive;
   final String destination;
+  final bool removeRedundantRoot;
   final String itemPath;
   final String expectedVersion;
   final String password;
@@ -317,7 +319,12 @@ Map<String, dynamic> _execute(
       response = run(
         job,
         engine,
-        utf8(request.operation),
+        utf8(
+          request.removeRedundantRoot &&
+                  const {'extract', 'extractHere'}.contains(request.operation)
+              ? '${request.operation}Flat'
+              : request.operation,
+        ),
         utf8(request.archive),
         utf8(request.destination),
         utf8(request.password),

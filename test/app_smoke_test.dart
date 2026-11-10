@@ -442,60 +442,75 @@ void main() {
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });
-  testWidgets('Finder 冷启动请求按顺序打开和解压，不丢失排队操作', (tester) async {
-    tester.view.physicalSize = const Size(1120, 700);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    final root = Directory.systemTemp.createTempSync('f7zip-finder-');
-    addTearDown(() => root.deleteSync(recursive: true));
-    final source = File(p.join(root.path, 'service.txt'))
-      ..writeAsStringSync('Finder request');
-    final archive = p.join(root.path, 'queued.zip');
-    await tester.runAsync(
-      () => ArchiveEngine().run(
-        ArchiveRequest('compress', archive, inputs: [source.path]),
-      ),
-    );
-    const channel = MethodChannel('sevenzip/desktop');
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(channel, (call) async {
-          if (call.method == 'takeFinderRequests') {
-            return [
-              {
-                'action': 'open',
-                'paths': [archive],
-              },
-              {
-                'action': 'extract',
-                'paths': [archive],
-              },
-            ];
-          }
-          return null;
-        });
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, null),
-    );
-    await tester.pumpWidget(const F7ZipApp());
-    final output = File(p.join(root.path, 'queued', 'service.txt'));
-    for (var attempt = 0; attempt < 150; attempt++) {
+  for (final removeRoot in [false, true]) {
+    testWidgets('Finder 冷启动请求按顺序打开和解压，不丢失排队操作 removeRoot=$removeRoot', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1120, 700);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final root = Directory.systemTemp.createTempSync('f7zip-finder-');
+      addTearDown(() => root.deleteSync(recursive: true));
+      final wrapped = Directory(p.join(root.path, 'wrapper'))..createSync();
+      File(p.join(wrapped.path, 'service.txt'))
+          .writeAsStringSync('Finder request');
+      final archive = p.join(root.path, 'queued.zip');
       await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        () => ArchiveEngine().run(
+          ArchiveRequest('compress', archive, inputs: [wrapped.path]),
+        ),
       );
-      await tester.pump();
-      if (output.existsSync() &&
-          find.textContaining('解压完成 ·').evaluate().isNotEmpty) {
-        break;
+      const channel = MethodChannel('sevenzip/desktop');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'loadSettings') {
+              return {'removeRedundantRoot': removeRoot};
+            }
+            if (call.method == 'takeFinderRequests') {
+              return [
+                {
+                  'action': 'open',
+                  'paths': [archive],
+                },
+                {
+                  'action': 'extract',
+                  'paths': [archive],
+                },
+              ];
+            }
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      await tester.pumpWidget(const F7ZipApp());
+      final output = File(
+        p.joinAll([
+          root.path,
+          'queued',
+          if (!removeRoot) 'wrapper',
+          'service.txt',
+        ]),
+      );
+      for (var attempt = 0; attempt < 150; attempt++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+        if (output.existsSync() &&
+            find.textContaining('解压完成 ·').evaluate().isNotEmpty) {
+          break;
+        }
       }
-    }
-    await tester.pumpAndSettle();
-    expect(output.readAsStringSync(), 'Finder request');
-    expect(find.textContaining('解压完成 ·'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox());
-  });
+      await tester.pumpAndSettle();
+      expect(output.readAsStringSync(), 'Finder request');
+      expect(find.textContaining('解压完成 ·'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
 }
 
 Future<void> _capture(GlobalKey key, String path) async {

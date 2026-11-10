@@ -15,6 +15,7 @@ void main() {
   test('旧配置使用默认值，保存和重新加载保留浏览与程序设置', () {
     final defaults = AppSettings.fromJson({});
     expect(defaults.singleClickOpen, isTrue);
+    expect(defaults.removeRedundantRoot, isFalse);
     expect(defaults.themeMode, ThemeMode.system);
     expect(defaults.colorTheme, AppColorTheme.purple);
     expect(
@@ -31,6 +32,7 @@ void main() {
       alternateRows: false,
       singleClickOpen: false,
       showDotEntries: false,
+      removeRedundantRoot: true,
       viewer: '/Applications/Viewer.app',
       editor: '/Applications/Editor.app',
     );
@@ -127,6 +129,9 @@ void main() {
     await tester.ensureVisible(find.text('显示返回上一级目录项（..）'));
     await tester.tap(find.text('显示返回上一级目录项（..）'));
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('解压时删除冗余的根目录'));
+    await tester.tap(find.text('解压时删除冗余的根目录'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('文件关联'));
     await tester.pumpAndSettle();
     expect(calls.where((call) => call.method == 'setFileAssociation'), isEmpty);
@@ -146,6 +151,7 @@ void main() {
     expect(saved!.colorTheme, AppColorTheme.green);
     expect(saved!.singleClickOpen, isFalse);
     expect(saved!.showDotEntries, isFalse);
+    expect(saved!.removeRedundantRoot, isTrue);
     expect(saved!.viewer, '/Applications/Viewer.app');
     expect(
       calls.lastWhere((call) => call.method == 'saveSettings').arguments,

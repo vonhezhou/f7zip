@@ -122,6 +122,17 @@ static void publishContents(const localfs::path& staging, const localfs::path& t
     }
 }
 
+// 仅去掉一个独占的顶层目录，内部目录结构保持完整，空目录也可直接发布。
+static localfs::path extractionRoot(const localfs::path& staging, bool removeRedundantRoot) {
+    if (!removeRedundantRoot) return staging;
+    auto entry = localfs::directory_iterator(staging);
+    if (entry == localfs::directory_iterator()) return staging;
+    const auto root = entry->path();
+    if (!localfs::is_directory(localfs::symlink_status(root))) return staging;
+    if (++entry != localfs::directory_iterator()) return staging;
+    return root;
+}
+
 static void validateEntry(const BitArchiveItemInfo& item) {
     auto name = item.path();
     std::replace(name.begin(), name.end(), '\\', '/');
@@ -356,7 +367,7 @@ __attribute__((visibility("default"))) char* f7_job_progress(Job* job) {
         ",\"file\":" + quote(job->currentFile) + "}");
 }
 
-// operation 为 list / extract / extractHere / test / compress，所有字符串使用 UTF-8。
+// operation 为 list / extract / extractHere / extractFlat / extractHereFlat / test / compress，所有字符串使用 UTF-8。
 __attribute__((visibility("default"))) char* f7_run(
     Job* job, const char* engine, const char* operation, const char* archive,
     const char* destination, const char* password, const char* format, int level,
@@ -408,10 +419,10 @@ __attribute__((visibility("default"))) char* f7_run(
             checkCancellation(job);
             return result("{\"ok\":true}");
         }
-        if (op != "extract" && op != "extractHere") throw std::runtime_error("未知操作");
+        if (op != "extract" && op != "extractHere" && op != "extractFlat" && op != "extractHereFlat") throw std::runtime_error("未知操作");
         for (const auto& item : reader.items()) validateEntry(item);
         localfs::path target(destination);
-        const bool intoExisting = op == "extractHere";
+        const bool intoExisting = op == "extractHere" || op == "extractHereFlat";
         if (intoExisting && !localfs::is_directory(target)) throw std::runtime_error("目标文件夹不存在");
         if (!intoExisting && localfs::exists(target)) throw std::runtime_error("目标目录已存在，请选择新目录名");
         StagingDirectory staging(intoExisting ? target : target.parent_path());
@@ -424,8 +435,9 @@ __attribute__((visibility("default"))) char* f7_run(
         }
         checkCancellation(job);
         if (archiveVersion(archive) != initialVersion) throw std::runtime_error("解压期间压缩包已变化，请重新打开");
-        if (intoExisting) publishContents(staging.path, target);
-        else publish(staging.path, target);
+        const auto root = extractionRoot(staging.path, op == "extractFlat" || op == "extractHereFlat");
+        if (intoExisting) publishContents(root, target);
+        else publish(root, target);
         return result("{\"ok\":true,\"version\":" + quote(initialVersion) + ",\"path\":" + quote(target.string()) + "}");
     } catch (const BitException& error) {
         const bool passwordRequired = error.code() == BitFailureSource::WrongPassword;

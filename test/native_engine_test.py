@@ -91,6 +91,69 @@ class NativeEngineTest(unittest.TestCase):
     def assert_no_staging(self):
         self.assertEqual(list(self.root.glob('.f7zip-*')), [])
 
+    def test_remove_redundant_root_preserves_inner_structure(self):
+        for format in ['zip', '7z']:
+            with self.subTest(format=format):
+                archive = self.create(format=format, password='secret')
+                target = self.root / ('flat-' + format)
+                self.assertFalse(execute('extractFlat', archive, target, password='wrong')['ok'])
+                self.assertFalse(target.exists())
+                response = execute('extractFlat', archive, target, password='secret')
+                self.assertTrue(response['ok'], response)
+                self.assertEqual((target / '你好.txt').read_text(), 'F7Zip 中文内容 🗂️\n')
+                self.assertTrue((target / 'empty').is_dir())
+                self.assertFalse((target / self.source.name).exists())
+                self.assert_no_staging()
+
+    def test_remove_redundant_root_only_removes_one_directory_layer(self):
+        cases = [
+            ({'root/nested/file.txt': b'content'}, {'nested/file.txt'}),
+            ({'root/': b''}, set()),
+            ({'file.txt': b'content'}, {'file.txt'}),
+            ({'one/a.txt': b'a', 'two/b.txt': b'b'}, {'one/a.txt', 'two/b.txt'}),
+            ({'root/a.txt': b'a', '.hidden': b'h'}, {'root/a.txt', '.hidden'}),
+            ({}, set()),
+        ]
+        for index, (entries, expected) in enumerate(cases):
+            with self.subTest(entries=entries):
+                archive = self.root / f'case-{index}.zip'
+                with zipfile.ZipFile(archive, 'w') as output:
+                    for name, data in entries.items():
+                        output.writestr(name, data)
+                target = self.root / f'case-{index}'
+                response = execute('extractFlat', archive, target)
+                self.assertTrue(response['ok'], response)
+                self.assertTrue(target.is_dir())
+                self.assertEqual({str(path.relative_to(target)) for path in target.rglob('*')
+                                  if path.is_file()}, expected)
+                if index == 1:
+                    self.assertEqual(list(target.iterdir()), [])
+                self.assert_no_staging()
+
+    def test_remove_redundant_root_selection_and_existing_target_protection(self):
+        archive = self.root / 'selection.zip'
+        with zipfile.ZipFile(archive, 'w') as output:
+            output.writestr('root/selected.txt', b'selected')
+            output.writestr('other.txt', b'other')
+        target = self.root / 'selected'
+        self.assertTrue(execute('extractFlat', archive, target, indices=[0])['ok'])
+        self.assertEqual((target / 'selected.txt').read_bytes(), b'selected')
+        self.assertEqual(list(target.iterdir()), [target / 'selected.txt'])
+        archive = self.create()
+        target = self.root / 'existing'
+        target.mkdir()
+        (target / '你好.txt').write_text('keep')
+        self.assertFalse(execute('extractHereFlat', archive, target)['ok'])
+        self.assertEqual((target / '你好.txt').read_text(), 'keep')
+        self.assertEqual({path.name for path in target.iterdir()}, {'你好.txt'})
+        (target / '你好.txt').unlink()
+        (target / 'keep.txt').write_text('keep')
+        self.assertTrue(execute('extractHereFlat', archive, target)['ok'])
+        self.assertEqual((target / 'keep.txt').read_text(), 'keep')
+        self.assertTrue((target / '你好.txt').is_file())
+        self.assertFalse(any(target.glob('.f7zip-*')))
+        self.assert_no_staging()
+
     def test_extract_here_preserves_unrelated_files_and_rejects_collisions(self):
         archive = self.create()
         target = self.root / 'existing'

@@ -10,6 +10,7 @@ class AppSettings {
     this.alternateRows = true,
     this.singleClickOpen = true,
     this.showDotEntries = true,
+    this.removeRedundantRoot = false,
     this.viewer = '',
     this.editor = '',
     this.themeMode = ThemeMode.system,
@@ -20,6 +21,7 @@ class AppSettings {
     alternateRows: json['alternateRows'] as bool? ?? true,
     singleClickOpen: json['singleClickOpen'] as bool? ?? true,
     showDotEntries: json['showDotEntries'] as bool? ?? true,
+    removeRedundantRoot: json['removeRedundantRoot'] as bool? ?? false,
     viewer: json['viewer'] as String? ?? '',
     editor: json['editor'] as String? ?? '',
     themeMode: ThemeMode.values.firstWhere(
@@ -35,6 +37,7 @@ class AppSettings {
   final bool alternateRows;
   final bool singleClickOpen;
   final bool showDotEntries;
+  final bool removeRedundantRoot;
   final String viewer;
   final String editor;
   final ThemeMode themeMode;
@@ -44,6 +47,7 @@ class AppSettings {
     'alternateRows': alternateRows,
     'singleClickOpen': singleClickOpen,
     'showDotEntries': showDotEntries,
+    'removeRedundantRoot': removeRedundantRoot,
     'viewer': viewer,
     'editor': editor,
     'themeMode': themeMode.name,
@@ -64,6 +68,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late bool _alternateRows = widget.initial.alternateRows;
   late bool _singleClickOpen = widget.initial.singleClickOpen;
   late bool _showDotEntries = widget.initial.showDotEntries;
+  late bool _removeRedundantRoot = widget.initial.removeRedundantRoot;
   late final _viewer = TextEditingController(text: widget.initial.viewer);
   late final _editor = TextEditingController(text: widget.initial.editor);
   List<Map<String, dynamic>> _associations = [];
@@ -141,6 +146,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       alternateRows: _alternateRows,
       singleClickOpen: _singleClickOpen,
       showDotEntries: _showDotEntries,
+      removeRedundantRoot: _removeRedundantRoot,
       viewer: _viewer.text.trim(),
       editor: _editor.text.trim(),
     );
@@ -266,6 +272,15 @@ class _SettingsDialogState extends State<SettingsDialog> {
                               ),
                             ),
                             const Divider(height: 1),
+                            SwitchListTile(
+                              title: const Text('解压时删除冗余的根目录'),
+                              subtitle: const Text(
+                                '结果只有一个顶层文件夹时去掉这一层，适用于主窗口和 Finder 解压',
+                              ),
+                              value: _removeRedundantRoot,
+                              onChanged: (value) =>
+                                  setState(() => _removeRedundantRoot = value),
+                            ),
                             SwitchListTile(
                               title: const Text('隔行背景色'),
                               subtitle: const Text('使用交替背景区分相邻文件，适配当前主题'),

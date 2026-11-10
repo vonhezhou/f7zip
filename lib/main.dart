@@ -305,6 +305,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               'extractHere',
               path,
               destination: parent ?? p.dirname(path),
+              removeRedundantRoot: _preferences.removeRedundantRoot,
               password: password,
             ),
           );
@@ -538,6 +539,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           'extract',
           archive,
           destination: destination,
+          removeRedundantRoot: _preferences.removeRedundantRoot,
           password: password,
           indices: indices,
         ),

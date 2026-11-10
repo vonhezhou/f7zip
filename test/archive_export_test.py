@@ -52,6 +52,25 @@ class ArchiveExportTest(unittest.TestCase):
         self.assertFalse((output / 'wrapper').exists())
         self.assert_clean()
 
+    def test_readonly_directory_can_be_published_before_restoring_permissions(self):
+        import stat
+        self.archive = self.root / 'readonly.tar'
+        with tarfile.open(self.archive, 'w') as writer:
+            directory = tarfile.TarInfo('readonly')
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o500
+            writer.addfile(directory)
+            item = tarfile.TarInfo('readonly/data.txt')
+            item.size = 7
+            writer.addfile(item, io.BytesIO(b'payload'))
+        output = self.root / 'exported'
+        result = self.export('readonly', output)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual((output / 'data.txt').read_bytes(), b'payload')
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o500)
+        output.chmod(0o700)
+        self.assert_clean()
+
     def test_existing_files_directories_and_dangling_links_are_preserved(self):
         output = self.root / 'conflict'
         for type in ['file', 'directory', 'symlink']:

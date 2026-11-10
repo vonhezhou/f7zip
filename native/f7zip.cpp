@@ -192,9 +192,15 @@ static void normalizeExportLinks(const localfs::path& root) {
         catch (const std::runtime_error&) {
             validateMaterializedLink(root / name, root);
             const auto relative = localfs::canonical(root / name).lexically_relative(localfs::canonical((root / name).parent_path()));
+            struct stat parentStatus{}, linkStatus{};
+            if (lstat((root / name).parent_path().c_str(), &parentStatus) != 0 || lstat((root / name).c_str(), &linkStatus) != 0) throw std::runtime_error("无法读取链接时间");
             if (unlink((root / name).c_str()) != 0 || symlink(relative.c_str(), (root / name).c_str()) != 0) {
                 throw std::runtime_error("无法调整拖出目录中的相对链接");
             }
+            const struct timespec linkTimes[] = {linkStatus.st_atimespec, linkStatus.st_mtimespec};
+            const struct timespec parentTimes[] = {parentStatus.st_atimespec, parentStatus.st_mtimespec};
+            if (utimensat(AT_FDCWD, (root / name).c_str(), linkTimes, AT_SYMLINK_NOFOLLOW) != 0 ||
+                utimensat(AT_FDCWD, (root / name).parent_path().c_str(), parentTimes, 0) != 0) throw std::runtime_error("无法恢复拖出链接的时间");
         }
     }
 }
@@ -1516,10 +1522,26 @@ __attribute__((visibility("default"))) char* f7_run(
         }
         else {
             if (localfs::is_directory(localfs::symlink_status(root))) validateMaterializedLinks(root);
-            permissions.apply();
             checkCancellation(job);
             if (volumeVersion(archive) != initialVolumes) throw std::runtime_error("发布期间压缩包或分卷已变化，请重新打开");
+            struct stat published{};
+            if (lstat(root.c_str(), &published) != 0) throw std::runtime_error("无法读取待发布的解压结果");
             publish(root, target);
+            try {
+                // 目录跨父级移动需要写权限，最终权限在发布完成后应用。
+                permissions.apply();
+                checkCancellation(job);
+                if (volumeVersion(archive) != initialVolumes) throw std::runtime_error("发布期间压缩包或分卷已变化，请重新打开");
+            } catch (...) {
+                permissions.rollback();
+                struct stat current{};
+                if (lstat(target.c_str(), &current) != 0 || !sameExtractedFile(published, current, true) ||
+                    renamex_np(target.c_str(), root.c_str(), RENAME_EXCL) != 0) {
+                    staging.preserve = true;
+                    throw std::runtime_error("目标被并发修改，解压结果保留于 " + target.string());
+                }
+                throw;
+            }
             // 整个暂存目录已成为用户结果，清理职责随发布转移。
             if (root == staging.path) staging.preserve = true;
         }

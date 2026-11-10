@@ -660,12 +660,14 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               ? '7z-visible'
               : options.format,
           level: options.level,
+          volumeSize: options.volumeSize,
           password: options.password,
         ),
       );
       if (result == null || !mounted) return;
-      _lastOutput = destination;
-      await _open(destination, password: options.password);
+      final output = result['path'] as String;
+      _lastOutput = output;
+      await _open(output, password: options.password);
     } catch (error) {
       await _error(error);
     }
@@ -2930,12 +2932,14 @@ class _CompressionOptions {
     this.format,
     this.level,
     this.password, {
+    this.volumeSize = 0,
     this.encryption = 'AES256',
     this.encryptNames = true,
   });
   final String format;
   final int level;
   final String password;
+  final int volumeSize;
   final String encryption;
   final bool encryptNames;
 }
@@ -2949,6 +2953,17 @@ class _CompressionDialog extends StatefulWidget {
 
 class _CompressionDialogState extends State<_CompressionDialog> {
   String _format = 'zip';
+  String _volume = 'none';
+  final _customVolume = TextEditingController();
+  int? get _volumeSize {
+    if (!_supportsPassword || _volume == 'none') return 0;
+    final mib = int.tryParse(
+      _volume == 'custom' ? _customVolume.text.trim() : _volume,
+    );
+    if (mib == null || mib < 1 || mib > 2097151) return null;
+    return mib * 1024 * 1024;
+  }
+
   int _level = 5;
   String _encryption = 'AES256';
   bool _encryptNames = true;
@@ -2961,6 +2976,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
       (widget.inputs.length == 1 && File(widget.inputs.single).existsSync());
   @override
   void dispose() {
+    _customVolume.dispose();
     _password.dispose();
     super.dispose();
   }
@@ -3050,6 +3066,41 @@ class _CompressionDialogState extends State<_CompressionDialog> {
               ],
             ),
             const SizedBox(height: 12),
+            if (_supportsPassword) ...[
+              DropdownButtonFormField<String>(
+                key: const ValueKey('volumeSize'),
+                initialValue: _volume,
+                decoration: const InputDecoration(labelText: '分卷大小'),
+                items: const [
+                  DropdownMenuItem(value: 'none', child: Text('不分卷')),
+                  DropdownMenuItem(value: '10', child: Text('10 MiB')),
+                  DropdownMenuItem(value: '100', child: Text('100 MiB')),
+                  DropdownMenuItem(value: '500', child: Text('500 MiB')),
+                  DropdownMenuItem(value: '2048', child: Text('2 GiB')),
+                  DropdownMenuItem(value: 'custom', child: Text('自定义')),
+                ],
+                onChanged: (value) => setState(() => _volume = value!),
+              ),
+              if (_volume == 'custom') ...[
+                const SizedBox(height: 12),
+                TextField(
+                  key: const ValueKey('customVolumeSize'),
+                  controller: _customVolume,
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) => setState(() {}),
+                  decoration: InputDecoration(
+                    labelText: '每卷大小（MiB）',
+                    errorText: _volumeSize == null ? '请输入 1–2097151 的整数' : null,
+                  ),
+                ),
+              ],
+              if (_volume != 'none')
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: Text('生成 .001、.002 等数字分卷，请保留整组文件。'),
+                ),
+              const SizedBox(height: 12),
+            ],
             if (_supportsPassword)
               TextField(
                 controller: _password,
@@ -3121,7 +3172,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
         child: const Text('取消'),
       ),
       FilledButton(
-        onPressed: !_validInput
+        onPressed: !_validInput || _volumeSize == null
             ? null
             : () => Navigator.pop(
                 context,
@@ -3129,6 +3180,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                   _format,
                   _level,
                   _supportsPassword ? _password.text : '',
+                  volumeSize: _volumeSize!,
                   encryption: _encryption,
                   encryptNames: _encryptNames,
                 ),

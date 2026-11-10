@@ -42,6 +42,10 @@ void main() {
       await tester.pumpAndSettle();
       // 切换到不支持加密的格式后，之前输入的密码不得传入引擎。
       await tester.enterText(find.byType(TextField), 'secret');
+      await tester.tap(find.byKey(const ValueKey('volumeSize')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('自定义').last);
+      await tester.pumpAndSettle();
       await _chooseFormat(tester, label);
       expect(find.byType(TextField), findsNothing);
       await tester.tap(find.text('选择保存位置'));
@@ -59,6 +63,64 @@ void main() {
         find.ancestor(of: find.text('添加'), matching: find.byType(TextButton)),
       );
       expect(addButton.onPressed, isNull);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  for (final format in ['zip', '7z']) {
+    testWidgets('$format 自定义分卷大小验证并自动打开首卷', (tester) async {
+      tester.view.physicalSize = const Size(1120, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final root = Directory.systemTemp.createTempSync('f7zip-create-volumes-');
+      addTearDown(() => root.deleteSync(recursive: true));
+      final source = File(p.join(root.path, 'payload.bin'))
+        ..writeAsBytesSync(List<int>.generate(1200000, (_) => 0));
+      final archive = p.join(root.path, 'split.$format');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'chooseInputs') return [source.path];
+        if (call.method == 'saveArchive') return archive;
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      await tester.pumpWidget(const F7ZipApp());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('新建压缩包').last);
+      await tester.pumpAndSettle();
+      if (format == '7z') await _chooseFormat(tester, '7z · 压缩率优先');
+      await tester.tap(find.byKey(const ValueKey('volumeSize')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('自定义').last);
+      await tester.pumpAndSettle();
+      final custom = find.byKey(const ValueKey('customVolumeSize'));
+      for (final invalid in ['', '0', '-1', '1.5', 'abc', '2097152']) {
+        await tester.enterText(custom, invalid);
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .widget<FilledButton>(find.widgetWithText(FilledButton, '选择保存位置'))
+              .onPressed,
+          isNull,
+        );
+      }
+      await tester.enterText(custom, '1');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('选择保存位置'));
+      for (var attempt = 0; attempt < 150; attempt++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+        if (find.text('只读浏览').evaluate().isNotEmpty) break;
+      }
+      await tester.pumpAndSettle();
+      expect(File('$archive.001').existsSync(), isTrue);
+      expect(File(archive).existsSync(), isFalse);
+      expect(find.text('只读浏览'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     });

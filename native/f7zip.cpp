@@ -35,6 +35,7 @@ using namespace bit7z;
 
 struct Job {
     uint32_t codePage = 0;
+    uint64_t volumeSize = 0;
     std::atomic<uint64_t> total{0};
     std::atomic<uint64_t> completed{0};
     std::atomic<bool> cancelled{false};
@@ -99,7 +100,7 @@ static void publish(const localfs::path& source, const localfs::path& target) {
 }
 
 // 先检查全部顶层条目，再逐个排他发布。发布失败时将本次结果移回暂存目录。
-static void publishContents(const localfs::path& staging, const localfs::path& target) {
+static void publishContents(const localfs::path& staging, const localfs::path& target, Job* job = nullptr) {
     std::vector<localfs::path> names;
     for (const auto& entry : localfs::directory_iterator(staging)) {
         const auto name = entry.path().filename();
@@ -111,9 +112,11 @@ static void publishContents(const localfs::path& staging, const localfs::path& t
     size_t published = 0;
     try {
         for (const auto& name : names) {
+            if (job) checkCancellation(job);
             publish(staging / name, target / name);
             ++published;
         }
+        if (job) checkCancellation(job);
     } catch (...) {
         bool restored = true;
         while (published > 0) {
@@ -262,14 +265,27 @@ class ArchiveLock {
 public:
     int descriptor;
     explicit ArchiveLock(const char* path) : descriptor(open(path, O_RDONLY | O_NOFOLLOW)) {
-        if (descriptor < 0) throw std::runtime_error("无法打开待更新压缩包");
+        if (descriptor < 0) throw std::runtime_error("无法打开待写入的位置，请检查目录或压缩包权限");
         if (flock(descriptor, LOCK_EX | LOCK_NB) != 0) {
             close(descriptor);
-            throw std::runtime_error("其他任务正在更新此压缩包，请稍后重试");
+            throw std::runtime_error("其他任务正在写入此位置，请稍后重试");
         }
     }
     ~ArchiveLock() { flock(descriptor, LOCK_UN); close(descriptor); }
 };
+
+// 检查完整数字卷组，防止旧的尾卷混入新结果。
+static void checkOutputGroup(const localfs::path& target) {
+    if (localfs::symlink_status(target).type() != localfs::file_type::not_found) {
+        throw std::runtime_error("目标文件已存在，请使用新文件名");
+    }
+    const auto family = volumeFamily(target.filename().string() + ".001");
+    for (const auto& entry : localfs::directory_iterator(target.parent_path())) {
+        if (volumeFamily(entry.path().filename().string()) == family) {
+            throw std::runtime_error("同名分卷已存在，请使用新文件名");
+        }
+    }
+}
 
 static std::string logicalPath(std::string value, bool allowRoot = false) {
     std::replace(value.begin(), value.end(), '\\', '/');
@@ -430,6 +446,10 @@ __attribute__((visibility("default"))) void f7_job_codepage(Job* job, uint32_t c
     job->codePage = codePage;
 }
 
+__attribute__((visibility("default"))) void f7_job_volume_size(Job* job, uint64_t size) {
+    job->volumeSize = size;
+}
+
 __attribute__((visibility("default"))) void f7_free(char* value) { free(value); }
 
 __attribute__((visibility("default"))) char* f7_job_progress(Job* job) {
@@ -464,6 +484,10 @@ __attribute__((visibility("default"))) char* f7_run(
             const auto found = formats.find(format);
             if (found == formats.end()) throw std::runtime_error("不支持的压缩格式");
             const auto& outputFormat = *found->second;
+            if (job->volumeSize && outputFormat != BitFormat::Zip && outputFormat != BitFormat::SevenZip) {
+                throw std::runtime_error("分卷创建仅支持 ZIP 和 7z");
+            }
+            checkOutputGroup(target);
             const bool tarStream = std::string(format).rfind("tar.", 0) == 0;
             const bool singleFile = !tarStream && !outputFormat.hasFeature(FormatFeatures::MultipleFiles);
             if (singleFile && inputCount != 1) throw std::runtime_error("所选格式仅支持压缩一个普通文件");
@@ -491,7 +515,9 @@ __attribute__((visibility("default"))) char* f7_run(
             compressor.setCompressionLevel(static_cast<BitCompressionLevel>(level));
             if (password[0]) compressor.setPassword(password, sevenZip && std::string(format) != "7z-visible");
             if (std::string(format) == "zip-aes256") compressor.setFormatProperty(L"em", L"AES256");
-            const auto output = staging.path / (std::string("archive.") + (tarStream ? "tar." : "") + outputFormat.extension());
+            compressor.setVolumeSize(job->volumeSize);
+            const auto output = job->volumeSize ? staging.path / target.filename() :
+                staging.path / (std::string("archive.") + (tarStream ? "tar." : "") + outputFormat.extension());
             if (tarStream) {
                 const auto tar = staging.path / "archive.tar";
                 BitFileCompressor packer(library, BitFormat::Tar);
@@ -502,8 +528,14 @@ __attribute__((visibility("default"))) char* f7_run(
             }
             compressor.compress(paths, output.string());
             checkCancellation(job);
-            publish(output, target);
-            return result("{\"ok\":true,\"path\":" + quote(target.string()) + "}");
+            // 发布期间锁住目标目录，避免本程序并发创建的卷组交错。
+            ArchiveLock directoryLock(localfs::canonical(target.parent_path()).c_str());
+            checkCancellation(job);
+            checkOutputGroup(target);
+            if (job->volumeSize) publishContents(staging.path, target.parent_path(), job);
+            else publish(output, target);
+            const auto first = job->volumeSize ? localfs::path(target.string() + ".001") : target;
+            return result("{\"ok\":true,\"path\":" + quote(first.string()) + "}");
         }
         const auto name = localfs::path(archive).filename().string();
         static const std::regex volumeName(R"((\.[0-9]{3,}|\.part[0-9]+\.rar|\.z[0-9]{2,}|\.r[0-9]{2,})$)", std::regex::icase);

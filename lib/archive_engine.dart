@@ -6,6 +6,9 @@ import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 import 'package:path/path.dart' as p;
 
+typedef _VolumeSizeNative = Void Function(Pointer<Void>, Uint64);
+typedef _VolumeSize = void Function(Pointer<Void>, int);
+
 typedef _CodePageNative = Void Function(Pointer<Void>, Uint32);
 typedef _CodePage = void Function(Pointer<Void>, int);
 
@@ -155,6 +158,7 @@ class ArchiveRequest {
     this.expectedVersion = '',
     this.password = '',
     this.codePage = 0,
+    this.volumeSize = 0,
     this.format = 'zip',
     this.level = 5,
     this.inputs = const [],
@@ -169,6 +173,7 @@ class ArchiveRequest {
   final String expectedVersion;
   final String password;
   final int codePage;
+  final int volumeSize;
   final String format;
   final int level;
   final List<String> inputs;
@@ -290,6 +295,9 @@ Map<String, dynamic> _execute(
       job,
       request.codePage,
     );
+    library.lookupFunction<_VolumeSizeNative, _VolumeSize>(
+      'f7_job_volume_size',
+    )(job, request.volumeSize);
     final engine = utf8(p.join(directory, '7z.so'));
     Pointer<Utf8> response;
     if (request.operation == 'update') {

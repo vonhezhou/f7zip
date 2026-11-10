@@ -1,5 +1,8 @@
 """真实分卷的透明读取、只读边界与失败保护。"""
 import binascii
+import threading
+import time
+import fcntl
 import os
 from pathlib import Path
 import subprocess
@@ -20,6 +23,128 @@ class MultiVolumeTest(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_create_volumes_round_trip_and_independent_zip_reader(self):
+        for format, password in [('zip', ''), ('7z', ''), ('zip-aes256', 'secret'), ('7z', 'secret')]:
+            with self.subTest(format=format, password=password):
+                archive = self.root / f'中文\n{format}-{bool(password)}'
+                response = execute('compress', archive, format=format, password=password,
+                                   inputs=[self.source], volume_size=50000)
+                self.assertTrue(response['ok'], response)
+                parts = sorted(self.root.glob(archive.name + '.*'))
+                self.assertGreater(len(parts), 1)
+                self.assertTrue(all(part.stat().st_size <= 50000 for part in parts))
+                self.assertEqual(response['path'], str(parts[0]))
+                self.assertFalse(archive.exists())
+                listing = execute('list', parts[0], password=password)
+                self.assertTrue(listing['ok'], listing)
+                self.assertFalse(listing['editable'])
+                self.assertTrue(execute('test', parts[0], password=password)['ok'])
+                output = self.root / f'out-{format}-{bool(password)}'
+                self.assertTrue(execute('extract', parts[0], output, password=password)['ok'])
+                self.assertEqual((output / self.source.name).read_bytes(), self.source.read_bytes())
+                if format == 'zip':
+                    joined = self.root / 'joined.zip'
+                    joined.write_bytes(b''.join(part.read_bytes() for part in parts))
+                    with zipfile.ZipFile(joined) as reader:
+                        self.assertEqual(reader.read(self.source.name), self.source.read_bytes())
+        self.assertEqual(list(self.root.glob('.f7zip-*')), [])
+
+    def test_create_one_volume_and_reject_unsupported_format(self):
+        archive = self.root / 'single.zip'
+        response = execute('compress', archive, inputs=[self.source], volume_size=1048576)
+        self.assertTrue(response['ok'], response)
+        self.assertEqual(response['path'], str(archive) + '.001')
+        self.assertTrue(execute('test', response['path'])['ok'])
+        response = execute('compress', self.root / 'bad.tar', format='tar',
+                           inputs=[self.source], volume_size=50000)
+        self.assertFalse(response['ok'], response)
+        self.assertEqual(list(self.root.glob('bad.tar*')), [])
+
+    def test_existing_tail_volume_and_base_are_preserved_then_retry(self):
+        archive = self.root / 'existing.zip'
+        markers = [Path(str(archive) + suffix) for suffix in ['', '.001', '.002', '.999', '.1000']]
+        markers.append(self.root / 'existing.ZIP.999')
+        for marker in markers:
+            marker.symlink_to(self.root / 'missing')
+            response = execute('compress', archive, inputs=[self.source], volume_size=50000)
+            self.assertFalse(response['ok'], response)
+            self.assertTrue(marker.is_symlink())
+            self.assertEqual(list(self.root.glob('.f7zip-*')), [])
+            marker.unlink()
+        self.assertTrue(execute('compress', archive, inputs=[self.source], volume_size=50000)['ok'])
+
+    def test_create_in_symlinked_output_directory(self):
+        actual = self.root / 'actual'
+        actual.mkdir()
+        link = self.root / 'linked'
+        link.symlink_to(actual, target_is_directory=True)
+        for volume_size in [0, 50000]:
+            archive = link / f'output-{volume_size}.zip'
+            response = execute('compress', archive, inputs=[self.source], volume_size=volume_size)
+            self.assertTrue(response['ok'], response)
+            self.assertTrue(execute('test', response['path'])['ok'])
+        self.assertEqual(list(actual.glob('.f7zip-*')), [])
+
+    def test_volume_publish_lock_failure_cleans_group_and_can_retry(self):
+        archive = self.root / 'locked.zip'
+        descriptor = os.open(self.root, os.O_RDONLY)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            response = execute('compress', archive, inputs=[self.source], volume_size=50000)
+            self.assertFalse(response['ok'], response)
+            self.assertEqual(list(self.root.glob('locked.zip*')), [])
+            self.assertEqual(list(self.root.glob('.f7zip-*')), [])
+        finally:
+            os.close(descriptor)
+        self.assertTrue(execute('compress', archive, inputs=[self.source], volume_size=50000)['ok'])
+
+    def test_running_volume_cancel_and_late_conflict_preserve_external_file(self):
+        self.source.write_bytes(os.urandom(16 * 1024 * 1024))
+        archive = self.root / 'running.zip'
+        for cancel in [True, False]:
+            job = LIB.f7_job_create()
+            responses = []
+            worker = threading.Thread(target=lambda: responses.append(execute(
+                'compress', archive, inputs=[self.source], volume_size=50000, job=job)))
+            worker.start()
+            marker = Path(str(archive) + '.999')
+            try:
+                deadline = time.monotonic() + 10
+                while not list(self.root.glob('.f7zip-*/*')) and worker.is_alive() and time.monotonic() < deadline:
+                    time.sleep(0.001)
+                self.assertTrue(worker.is_alive(), '任务应在暂存分卷期间执行')
+                if cancel:
+                    LIB.f7_job_cancel(job)
+                else:
+                    marker.write_bytes(b'external')
+                worker.join(timeout=30)
+                self.assertFalse(worker.is_alive())
+                self.assertFalse(responses[0]['ok'], responses)
+                if cancel:
+                    self.assertTrue(responses[0]['cancelled'], responses)
+                else:
+                    self.assertEqual(marker.read_bytes(), b'external')
+                    marker.unlink()
+                self.assertEqual(list(self.root.glob('running.zip*')), [])
+                self.assertEqual(list(self.root.glob('.f7zip-*')), [])
+            finally:
+                LIB.f7_job_cancel(job)
+                worker.join()
+                LIB.f7_job_destroy(job)
+
+    def test_concurrent_volume_creation_publishes_one_consistent_group(self):
+        archive = self.root / 'concurrent.zip'
+        responses = []
+        threads = [threading.Thread(target=lambda: responses.append(execute(
+            'compress', archive, inputs=[self.source], volume_size=50000))) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sum(response['ok'] for response in responses), 1, responses)
+        self.assertTrue(execute('test', str(archive) + '.001')['ok'])
+        self.assertEqual(list(self.root.glob('.f7zip-*')), [])
 
     def numbered(self, name='bundle', password=''):
         archive = self.root / (name + '.7z')

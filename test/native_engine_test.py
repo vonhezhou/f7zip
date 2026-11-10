@@ -21,6 +21,7 @@ LIB = ctypes.CDLL(str(ROOT / 'native/lib/libf7zip.dylib'))
 LIB.f7_job_create.restype = ctypes.c_void_p
 LIB.f7_job_destroy.argtypes = [ctypes.c_void_p]
 LIB.f7_job_cancel.argtypes = [ctypes.c_void_p]
+LIB.f7_job_volume_size.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
 LIB.f7_job_codepage.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 LIB.f7_free.argtypes = [ctypes.c_void_p]
 LIB.f7_run.restype = ctypes.c_void_p
@@ -29,9 +30,10 @@ LIB.f7_run.argtypes = [ctypes.c_void_p, *([ctypes.c_char_p] * 6), ctypes.c_int,
                       ctypes.POINTER(ctypes.c_uint32), ctypes.c_int]
 
 
-def execute(operation, archive, destination='', password='', format='zip', inputs=(), indices=(), job=None, code_page=0):
+def execute(operation, archive, destination='', password='', format='zip', inputs=(), indices=(), job=None, code_page=0, volume_size=0):
     owned = job is None
     job = LIB.f7_job_create() if owned else job
+    LIB.f7_job_volume_size(job, volume_size)
     LIB.f7_job_codepage(job, code_page)
     strings = [str(value).encode() for value in [ROOT / 'native/lib/7z.so', operation,
                archive, destination, password, format]]

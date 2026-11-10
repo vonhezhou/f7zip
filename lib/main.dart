@@ -8,6 +8,8 @@ import 'package:path/path.dart' as p;
 
 import 'archive_engine.dart';
 import 'archive_drag.dart';
+import 'archive_task.dart';
+import 'archive_task_panel.dart';
 import 'archive_preview.dart';
 import 'nested_archive.dart';
 import 'archive_tree.dart';
@@ -98,7 +100,10 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   bool _cancelling = false;
   List<ArchiveEntry> _entries = [];
   ArchiveTreeNode _tree = buildArchiveTree([]);
-  final List<Map<String, dynamic>> _finderRequests = [];
+  final List<ArchiveTask> _archiveTasks = [];
+  ArchiveTask? _activeQueuedTask;
+  int _nextTaskId = 0;
+  bool _showTasks = false;
   Timer? _finderTimer;
   bool _handlingFinderRequest = false;
   final Set<String> _selected = {};
@@ -238,7 +243,55 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
 
   void _enqueueFinderRequest(Map<String, dynamic> request) {
     if (!mounted) return;
-    _finderRequests.add(request);
+    final action = request['action'] as String;
+    if (!const [
+      'open',
+      'compress',
+      'compressZip',
+      'extract',
+      'extractHere',
+      'extractTo',
+      'batchExtract',
+      'test',
+    ].contains(action)) {
+      return;
+    }
+    final paths = (request['paths'] as List).cast<String>();
+    final destination = ArchiveTaskDestination();
+    if (request['destination'] is String) {
+      destination.chosen = true;
+      destination.path = request['destination'] as String;
+    }
+    final groups =
+        const ['compress', 'compressZip'].contains(action) || paths.isEmpty
+        ? [paths]
+        : paths.map((path) => [path]);
+    setState(() {
+      for (final group in groups) {
+        _archiveTasks.add(
+          ArchiveTask(
+            id: ++_nextTaskId,
+            action: action,
+            paths: List.unmodifiable(group),
+            fromFinder: request['fromFinder'] != false,
+            destination: destination,
+          ),
+        );
+      }
+      if (action != 'open') _showTasks = true;
+      _trimArchiveTaskHistory();
+    });
+    _scheduleArchiveTasks();
+  }
+
+  void _trimArchiveTaskHistory() {
+    // 只裁剪已结束的历史，保留全部等待和执行中的任务。
+    while (_archiveTasks.where((task) => task.finished).length > 100) {
+      _archiveTasks.remove(_archiveTasks.firstWhere((task) => task.finished));
+    }
+  }
+
+  void _scheduleArchiveTasks() {
     _finderTimer ??= Timer.periodic(
       const Duration(milliseconds: 200),
       (_) => _processFinderRequests(),
@@ -246,73 +299,184 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     _processFinderRequests();
   }
 
+  void _cancelArchiveTask(ArchiveTask task) {
+    if (task.finished) return;
+    setState(() {
+      task.cancelRequested = true;
+      if (task.state == ArchiveTaskState.queued) {
+        task.state = ArchiveTaskState.cancelled;
+      } else {
+        _engine?.cancel();
+        _cancelling = true;
+      }
+    });
+  }
+
+  void _retryArchiveTask(ArchiveTask task) {
+    if (!task.finished || task.state == ArchiveTaskState.succeeded) return;
+    setState(() {
+      task.state = ArchiveTaskState.queued;
+      task.cancelRequested = false;
+      task.error = null;
+      task.output = null;
+      task.progress = null;
+      task.file = '';
+      task.phase = '';
+      if (task.destination.path == null) task.destination.chosen = false;
+      _archiveTasks.remove(task);
+      _archiveTasks.add(task);
+    });
+    _scheduleArchiveTasks();
+  }
+
   Future<void> _processFinderRequests() async {
     if (!mounted ||
         _handlingFinderRequest ||
-        _openingFile ||
-        _mutating ||
-        !_available ||
+        !_interactive ||
         Navigator.of(context).canPop()) {
       return;
     }
     _handlingFinderRequest = true;
     try {
-      while (mounted &&
-          _finderRequests.isNotEmpty &&
-          _available &&
-          !Navigator.of(context).canPop()) {
-        final request = _finderRequests.removeAt(0);
-        final paths = (request['paths'] as List).cast<String>();
+      while (mounted && _interactive && !Navigator.of(context).canPop()) {
+        final pending = _archiveTasks.where(
+          (task) => task.state == ArchiveTaskState.queued,
+        );
+        if (pending.isEmpty) break;
+        final task = pending.first;
+        setState(() {
+          task.state = ArchiveTaskState.running;
+          _activeQueuedTask = task;
+        });
+        var succeeded = false;
         try {
-          switch (request['action']) {
-            case 'compress':
-              await _create(paths);
-              break;
-            case 'compressZip':
-              await _finderCompressZip(paths);
-              break;
-            case 'extractHere':
-            case 'extractTo':
-              await _finderExtract(
-                paths,
-                chooseFolder: request['action'] == 'extractTo',
-              );
-              break;
-            case 'extract':
-              for (final path in paths) {
-                if (!mounted || !await _open(path)) break;
-                await _extract(besideArchive: true);
-              }
-              break;
-            case 'open':
-              for (final path in paths) {
-                if (!mounted || !await _open(path)) break;
-              }
-              break;
-          }
+          succeeded = await _executeArchiveTask(task);
         } catch (error) {
-          if (const [
-            'compressZip',
-            'extractHere',
-            'extractTo',
-          ].contains(request['action'])) {
+          task.error = '$error';
+          if (task.fromFinder && !task.cancelRequested) {
             await _desktop.invokeMethod<void>('finderError', '$error');
-          } else {
-            await _error(error);
+          }
+        } finally {
+          if (mounted) {
+            setState(() {
+              task.state = succeeded
+                  ? ArchiveTaskState.succeeded
+                  : task.cancelRequested || task.error == null
+                  ? ArchiveTaskState.cancelled
+                  : ArchiveTaskState.failed;
+              if (succeeded) task.progress = 1;
+              _activeQueuedTask = null;
+              _trimArchiveTaskHistory();
+            });
           }
         }
       }
     } finally {
       _handlingFinderRequest = false;
-      if (_finderRequests.isEmpty) {
+      if (!_archiveTasks.any((task) => task.state == ArchiveTaskState.queued)) {
         _finderTimer?.cancel();
         _finderTimer = null;
       }
     }
   }
 
-  Future<void> _finderCompressZip(List<String> paths) async {
-    if (paths.isEmpty) return;
+  Future<bool> _executeArchiveTask(ArchiveTask task) async {
+    switch (task.action) {
+      case 'compress':
+        return _create(task.paths);
+      case 'compressZip':
+        return _finderCompressZip(task.paths);
+      case 'extractTo':
+        if (!task.destination.chosen) {
+          task.destination.chosen = true;
+          setState(() => _choosing = true);
+          try {
+            task.destination.path = await _desktop.invokeMethod<String>(
+              'finderChooseFolder',
+            );
+          } finally {
+            if (mounted) setState(() => _choosing = false);
+          }
+        }
+        if (task.destination.path == null || task.cancelRequested || !mounted) {
+          return false;
+        }
+        return _finderExtract(
+          task.paths,
+          chooseFolder: true,
+          chosenParent: task.destination.path,
+        );
+      case 'batchExtract':
+        return _finderExtract(
+          task.paths,
+          chooseFolder: true,
+          chosenParent: task.destination.path,
+          separate: true,
+          finder: false,
+        );
+      case 'extractHere':
+        return _finderExtract(task.paths, chooseFolder: false);
+      case 'extract':
+        if (task.paths.isEmpty || !await _open(task.paths.single)) return false;
+        return _extract(besideArchive: true);
+      case 'open':
+        return task.paths.isNotEmpty && await _open(task.paths.single);
+      case 'test':
+        var password = '';
+        while (mounted && !task.cancelRequested) {
+          try {
+            return await _run(
+                  '完整性测试',
+                  ArchiveRequest(
+                    'test',
+                    task.paths.single,
+                    password: password,
+                    codePage: _preferences.filenameEncoding.codePage,
+                  ),
+                ) !=
+                null;
+          } on ArchiveFailure catch (error) {
+            if (!error.passwordRequired) rethrow;
+            final value = await _askPassword(error: error.message);
+            if (value == null || !mounted) return false;
+            password = value;
+          }
+        }
+        return false;
+    }
+    return false;
+  }
+
+  Future<void> _enqueueBatch(String action) async {
+    if (!_desktopReady || _choosing || Navigator.of(context).canPop()) return;
+    setState(() => _choosing = true);
+    try {
+      final paths =
+          await _desktop.invokeListMethod<String>('chooseArchives') ?? [];
+      if (paths.isEmpty || !mounted) return;
+      String? destination;
+      if (action == 'batchExtract') {
+        final directories =
+            await _desktop.invokeListMethod<String>('chooseFolder') ?? [];
+        if (directories.isEmpty || !mounted) return;
+        destination = directories.first;
+      }
+      _enqueueFinderRequest({
+        'action': action,
+        'paths': paths,
+        'fromFinder': false,
+        'destination': ?destination,
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _choosing = false);
+        _processFinderRequests();
+      }
+    }
+  }
+
+  Future<bool> _finderCompressZip(List<String> paths) async {
+    if (paths.isEmpty) return false;
     final parent = p.dirname(paths.first);
     final name = paths.length == 1 ? p.basename(paths.first) : 'Archive';
     var destination = p.join(parent, '$name.zip');
@@ -332,32 +496,36 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         _status = '压缩完成 · $destination';
       });
     }
+    return result != null;
   }
 
-  Future<void> _finderExtract(
+  Future<bool> _finderExtract(
     List<String> paths, {
     required bool chooseFolder,
+    String? chosenParent,
+    bool separate = false,
+    bool finder = true,
   }) async {
-    final parent = chooseFolder
-        ? await _desktop.invokeMethod<String>('finderChooseFolder')
-        : null;
-    if (chooseFolder && parent == null) return;
+    final parent = chosenParent;
+    if (chooseFolder && parent == null) return false;
     for (final path in paths) {
       var password = '';
       while (mounted) {
         try {
           final result = await _runExtraction(
             path,
-            chooseFolder && _preferences.smartExtraction
+            (separate || chooseFolder && _preferences.smartExtraction)
                 ? _extractionDestination(parent!, path)
                 : parent ?? p.dirname(path),
             password: password,
             codePage: _preferences.filenameEncoding.codePage,
-            intoExisting: true,
-            finder: true,
+            intoExisting:
+                !separate ||
+                Directory(_extractionDestination(parent!, path)).existsSync(),
+            finder: finder,
             smartDestination: chooseFolder && _preferences.smartExtraction,
           );
-          if (result == null || !mounted) return;
+          if (result == null || !mounted) return false;
           setState(() {
             _lastOutput = result['path'] as String;
             _status = '解压完成 · ${p.basename(path)}';
@@ -365,16 +533,30 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           break;
         } on ArchiveFailure catch (error) {
           if (!error.passwordRequired) rethrow;
-          final value = await _desktop.invokeMethod<String>('finderPassword', {
-            'path': path,
-            if (password.isNotEmpty)
-              'error': '密码错误或加密数据损坏，请重新输入。\n${p.basename(path)}',
-          });
-          if (value == null || !mounted) return;
+          String? value;
+          if (finder) {
+            setState(() => _choosing = true);
+            try {
+              value = await _desktop.invokeMethod<String>('finderPassword', {
+                'path': path,
+                if (password.isNotEmpty)
+                  'error': '密码错误或加密数据损坏，请重新输入。\n${p.basename(path)}',
+              });
+            } finally {
+              if (mounted) setState(() => _choosing = false);
+            }
+          } else {
+            value = await _askPassword(error: error.message);
+          }
+          if (value == null || !mounted) {
+            _activeQueuedTask?.cancelRequested = true;
+            return false;
+          }
           password = value;
         }
       }
     }
+    return mounted;
   }
 
   Future<List<String>> _choose(String method) async {
@@ -392,7 +574,12 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     ArchiveRequest request, {
     bool dragExport = false,
   }) async {
-    if (!_engineAvailable || (_exportingDrag && !dragExport)) return null;
+    if (!_engineAvailable ||
+        (_exportingDrag && !dragExport) ||
+        _activeQueuedTask?.cancelRequested == true) {
+      return null;
+    }
+    final queued = dragExport ? null : _activeQueuedTask;
     final operation = Completer<void>();
     _activeOperation = operation;
     setState(() {
@@ -402,6 +589,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       _currentFile = '';
       _progress = null;
       _status = task;
+      if (queued != null) {
+        queued.phase = task;
+        queued.progress = null;
+        queued.error = null;
+      }
     });
     _timer = Timer.periodic(const Duration(milliseconds: 150), (_) {
       final value = _engine?.progress();
@@ -411,13 +603,26 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       setState(() {
         _progress = total == 0 ? null : (completed / total).clamp(0.0, 1.0);
         _currentFile = value['file'] as String;
+        queued?.progress = _progress;
+        queued?.file = _currentFile;
       });
     });
     try {
       final result = await _engine!.run(request);
-      if (mounted) setState(() => _status = '$task完成');
+      if (mounted) {
+        setState(() {
+          _status = '$task完成';
+          queued?.error = null;
+          if (result['path'] is String) {
+            queued?.output = result['path'] as String;
+          }
+        });
+      }
       return result;
     } on ArchiveFailure catch (error) {
+      queued?.error = error.cancelled || error.passwordRequired
+          ? null
+          : error.message;
       if (mounted) setState(() => _status = error.cancelled ? '操作已取消' : '操作失败');
       if (!error.cancelled) rethrow;
       return null;
@@ -482,6 +687,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   Future<Map<String, dynamic>> _writeArchivePromise(
     Map<dynamic, dynamic> arguments,
   ) {
+    if (_activeQueuedTask != null) {
+      throw PlatformException(code: 'busy', message: '请等待当前队列任务完成后重新拖出');
+    }
     final session = _dragSessions[arguments['session']];
     final itemId = arguments['item'];
     final destination = arguments['destination'];
@@ -649,6 +857,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     );
     // 等待对话框退场，避免动画期间仍访问已释放的 controller。
     Future<void>.delayed(const Duration(seconds: 1), controller.dispose);
+    if (result == null) _activeQueuedTask?.cancelRequested = true;
     return result;
   }
 
@@ -662,6 +871,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     _openingFile = true;
     try {
       if (!await File(path).exists()) {
+        _activeQueuedTask?.error = '压缩包不存在或已被移动。\n$path';
         await _error('压缩包不存在或已被移动。\n$path');
         return false;
       }
@@ -755,7 +965,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     }
   }
 
-  Future<void> _extract({
+  Future<bool> _extract({
     bool selectedOnly = false,
     bool besideArchive = false,
   }) async {
@@ -763,12 +973,12 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     if (!_interactive ||
         archive == null ||
         (selectedOnly && _selected.isEmpty)) {
-      return;
+      return false;
     }
     var password = _password;
     if (password.isEmpty && _entries.any((entry) => entry.encrypted)) {
       final value = await _askPassword();
-      if (value == null || !mounted) return;
+      if (value == null || !mounted) return false;
       password = value;
     }
     String parent;
@@ -776,10 +986,10 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       parent = p.dirname(archive);
     } else {
       final paths = await _choose('chooseFolder');
-      if (paths.isEmpty) return;
+      if (paths.isEmpty) return false;
       parent = paths.first;
     }
-    if (!mounted || !_available) return;
+    if (!mounted || !_available) return false;
     final destination = _extractionDestination(parent, archive);
     final indices = selectedOnly
         ? _entries
@@ -804,8 +1014,10 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           _status = '解压完成 · $_lastOutput';
         });
       }
+      return result != null;
     } catch (error) {
       await _error(error);
+      return false;
     }
   }
 
@@ -906,6 +1118,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           }
         }
         if (choice == null || choice == ExtractionPolicy.fail || !mounted) {
+          _activeQueuedTask?.cancelRequested = true;
           if (mounted) setState(() => _status = '解压已取消');
           return null;
         }
@@ -956,10 +1169,10 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     if (mounted) setState(() => _preferences = settings);
   }
 
-  Future<void> _create([List<String>? dropped]) async {
-    if (!_interactive) return;
+  Future<bool> _create([List<String>? dropped]) async {
+    if (!_interactive) return false;
     final inputs = dropped ?? await _choose('chooseInputs');
-    if (inputs.isEmpty || !mounted) return;
+    if (inputs.isEmpty || !mounted) return false;
     final options = await showDialog<_CompressionOptions>(
       context: context,
       builder: (_) => _CompressionDialog(
@@ -968,7 +1181,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         onPresetsChanged: _saveCompressionPresets,
       ),
     );
-    if (options == null || !mounted || !_available) return;
+    if (options == null || !mounted || !_available) return false;
     setState(() => _choosing = true);
     String? destination;
     try {
@@ -979,7 +1192,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     } finally {
       if (mounted) setState(() => _choosing = false);
     }
-    if (destination == null || !mounted) return;
+    if (destination == null || !mounted) return false;
     if (!destination.toLowerCase().endsWith('.${options.format}')) {
       destination += '.${options.format}';
     }
@@ -1000,12 +1213,14 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           password: options.password,
         ),
       );
-      if (result == null || !mounted) return;
+      if (result == null || !mounted) return false;
       final output = result['path'] as String;
       _lastOutput = output;
       await _open(output, password: options.password);
+      return true;
     } catch (error) {
       await _error(error);
+      return false;
     }
   }
 
@@ -1313,7 +1528,15 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   }
 
   Future<void> _command(String command) async {
-    if (!_interactive) return;
+    if (command == 'tasks') {
+      setState(() => _showTasks = !_showTasks);
+      return;
+    }
+    if (command == 'batchExtract' || command == 'batchTest') {
+      await _enqueueBatch(command == 'batchTest' ? 'test' : command);
+      return;
+    }
+    if (!_interactive || _activeQueuedTask != null) return;
     switch (command) {
       case 'open':
         await _openDialog();
@@ -2196,6 +2419,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   Widget build(BuildContext context) {
     final archive = _archive;
     final commandState = <String, bool>{
+      'tasks': true,
+      'batchExtract': _desktopReady && !_choosing,
+      'batchTest': _desktopReady && !_choosing,
       'open': _interactive,
       'new': _interactive,
       'extract': _interactive && archive != null,
@@ -2317,7 +2543,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
                         (_edits!.sessions.isNotEmpty ||
                             _edits!.recoveryErrors.isNotEmpty))
                       _editStatus(),
-                    if (_busy) _progressPanel(),
+                    if (_showTasks) _archiveTaskPanel(),
+                    if (_busy && (!_showTasks || _activeQueuedTask == null))
+                      _progressPanel(),
                     _statusbar(),
                   ],
                 ),
@@ -2434,12 +2662,13 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               ? () => _openFile(_selectedFile!, editing: true)
               : null,
         ),
-        _tool(
-          Icons.article_outlined,
-          '属性',
-          '⌘I',
-          _interactive && _archive != null ? _properties : null,
-        ),
+        if (MediaQuery.sizeOf(context).width >= 860)
+          _tool(
+            Icons.article_outlined,
+            '属性',
+            '⌘I',
+            _interactive && _archive != null ? _properties : null,
+          ),
         const Spacer(),
         PopupMenuButton<String>(
           tooltip: '最近打开',
@@ -2461,6 +2690,13 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
                 ),
               )
               .toList(),
+        ),
+        IconButton(
+          tooltip: '任务队列',
+          constraints: const BoxConstraints.tightFor(width: 32, height: 36),
+          padding: EdgeInsets.zero,
+          onPressed: () => setState(() => _showTasks = !_showTasks),
+          icon: const Icon(Icons.list_alt_outlined, size: 19),
         ),
         IconButton(
           tooltip: '设置',
@@ -2493,6 +2729,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
             }
           },
           itemBuilder: (_) => [
+            PopupMenuItem(
+              value: 'properties',
+              enabled: _archive != null,
+              child: const Text('属性'),
+            ),
             PopupMenuItem(
               value: 'nested',
               enabled:
@@ -3462,6 +3703,23 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     ),
   );
 
+  Widget _archiveTaskPanel() => ArchiveTaskPanel(
+    tasks: _archiveTasks,
+    engineBusy: _busy,
+    onCancel: _cancelArchiveTask,
+    onRetry: _retryArchiveTask,
+    onClear: () =>
+        setState(() => _archiveTasks.removeWhere((task) => task.finished)),
+    onClose: () => setState(() => _showTasks = false),
+    onReveal: (path) => _desktop.invokeMethod<void>('reveal', path),
+    onBatchExtract: _desktopReady && !_choosing
+        ? () => _enqueueBatch('batchExtract')
+        : null,
+    onBatchTest: _desktopReady && !_choosing
+        ? () => _enqueueBatch('test')
+        : null,
+  );
+
   Widget _progressPanel() => Container(
     padding: const EdgeInsets.fromLTRB(14, 8, 12, 8),
     color: AppColors.of(context).tint,
@@ -3519,8 +3777,13 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           onPressed: _cancelling
               ? null
               : () {
-                  _engine?.cancel();
-                  setState(() => _cancelling = true);
+                  final task = _activeQueuedTask;
+                  if (task != null) {
+                    _cancelArchiveTask(task);
+                  } else {
+                    _engine?.cancel();
+                    setState(() => _cancelling = true);
+                  }
                 },
           child: const Text('取消'),
         ),

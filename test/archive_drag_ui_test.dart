@@ -18,6 +18,7 @@ void main() {
     'changed',
     'conflict',
     'encrypted',
+    'queueBusy',
   ]) {
     testWidgets('文件名拖放经原生承诺消息处理 $scenario', (tester) async {
       tester.view.physicalSize = const Size(1120, 800);
@@ -43,6 +44,7 @@ void main() {
       final output = Directory(p.join(root.path, 'output'))..createSync();
       Map<dynamic, dynamic>? drag;
       var passwords = 0;
+      final queueChoice = Completer<String?>();
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       messenger.setMockMethodCallHandler(channel, (call) async {
@@ -53,6 +55,9 @@ void main() {
               'paths': [archive],
             },
           ];
+        }
+        if (call.method == 'finderChooseFolder' && scenario == 'queueBusy') {
+          return queueChoice.future;
         }
         if (call.method == 'startArchiveDrag') drag = call.arguments as Map;
         if (call.method == 'finderPassword') {
@@ -105,6 +110,13 @@ void main() {
       if (scenario == 'changed') {
         File(archive).writeAsBytesSync([...File(archive).readAsBytesSync(), 0]);
       }
+      if (scenario == 'queueBusy') {
+        await _native('finderRequest', {
+          'action': 'extractTo',
+          'paths': <String>[],
+        });
+        await tester.pump();
+      }
       final results = <Object>[];
       for (final item in items) {
         unawaited(
@@ -119,7 +131,31 @@ void main() {
         );
       }
       await _until(tester, () => results.length == items.length);
-      if (scenario == 'cancel' || scenario == 'changed') {
+      if (scenario == 'queueBusy') {
+        expect(results.single, isA<PlatformException>());
+        expect((results.single as PlatformException).code, 'busy');
+        expect(output.listSync(), isEmpty);
+        queueChoice.complete(null);
+        await tester.pumpAndSettle();
+        Object? retried;
+        unawaited(
+          _native('writeArchivePromise', {
+            'session': drag!['session'],
+            'item': items.single['id'],
+            'destination': p.join(output.path, items.single['name'] as String),
+          }).then<void>(
+            (value) => retried = value as Object,
+            onError: (Object error, StackTrace stack) => retried = error,
+          ),
+        );
+        await _until(tester, () => retried != null);
+        expect(retried, {'ok': true});
+        expect(
+          File(p.join(output.path, items.single['name'] as String))
+              .readAsStringSync(),
+          'one',
+        );
+      } else if (scenario == 'cancel' || scenario == 'changed') {
         expect(results.every((value) => value is PlatformException), isTrue);
         expect(output.listSync(), isEmpty);
       } else if (scenario == 'conflict') {

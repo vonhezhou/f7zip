@@ -164,11 +164,11 @@ class MainFlutterWindow: NSWindow {
         result(self.associationStates())
       case "setFileAssociation":
         self.setAssociation(call.arguments as? [String: Any] ?? [:], result: result)
-      case "openArchive", "chooseInputs", "chooseFolder":
+      case "openArchive", "chooseArchives", "chooseInputs", "chooseFolder":
         let panel = NSOpenPanel()
         panel.canChooseFiles = call.method != "chooseFolder"
-        panel.canChooseDirectories = call.method != "openArchive"
-        panel.allowsMultipleSelection = call.method == "chooseInputs"
+        panel.canChooseDirectories = !["openArchive", "chooseArchives"].contains(call.method)
+        panel.allowsMultipleSelection = ["chooseInputs", "chooseArchives"].contains(call.method)
         panel.prompt = call.method == "chooseFolder" ? "选择目标文件夹" : "选择"
         panel.beginSheetModal(for: self) { response in
           result(response == .OK ? panel.urls.map { $0.path } : [])
@@ -452,6 +452,9 @@ private class ArchiveMenuTarget: NSObject, NSMenuItemValidation {
     file.addItem(item("测试压缩包", "test"))
     file.addItem(.separator())
     file.addItem(item("属性", "properties", "i"))
+    file.addItem(item("批量解压…", "batchExtract"))
+    file.addItem(item("批量测试…", "batchTest"))
+    file.addItem(item("任务队列", "tasks"))
     file.addItem(item("关闭压缩包", "close", "w"))
     let fileRoot = NSMenuItem(title: "文件", action: nil, keyEquivalent: "")
     fileRoot.submenu = file

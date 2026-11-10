@@ -98,7 +98,11 @@ def main():
              '-DEXTERNAL_CODECS', '-DENV_UNIX', '-DBREAK_HANDLER', '-DUSE_WIN_FILE',
              '-I' + str(BIT7Z / 'include'), '-I' + str(BIT7Z / 'include/bit7z'),
              '-I' + str(BIT7Z / 'src'), '-I' + str(ENGINE / 'CPP')]
-    sources = sorted((BIT7Z / 'src').rglob('*.cpp')) + [ROOT / 'native/f7zip.cpp', ROOT / 'native/zip_encoding.mm']
+    # 使用保留 MPL 许可证的本地实现，向 TAR 写入器提供 POSIX 权限。
+    sources = [source for source in sorted((BIT7Z / 'src').rglob('*.cpp'))
+               if source != BIT7Z / 'src/internal/genericinputitem.cpp']
+    sources += [ROOT / 'native/bit7z_genericinputitem.cpp',
+                ROOT / 'native/f7zip.cpp', ROOT / 'native/zip_encoding.mm']
 
     def compile_source(source):
         name = str(source.relative_to(ROOT / 'native')).replace('/', '_') + '.o'

@@ -301,16 +301,13 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       var password = '';
       while (mounted) {
         try {
-          final result = await _run(
-            '解压',
-            ArchiveRequest(
-              'extractHere',
-              path,
-              destination: parent ?? p.dirname(path),
-              removeRedundantRoot: _preferences.removeRedundantRoot,
-              codePage: _preferences.filenameEncoding.codePage,
-              password: password,
-            ),
+          final result = await _runExtraction(
+            path,
+            parent ?? p.dirname(path),
+            password: password,
+            codePage: _preferences.filenameEncoding.codePage,
+            intoExisting: true,
+            finder: true,
           );
           if (result == null || !mounted) return;
           setState(() {
@@ -558,7 +555,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     var destination = p.join(parent, stem);
     var suffix = 2;
     while (FileSystemEntity.typeSync(destination, followLinks: false) !=
-        FileSystemEntityType.notFound) {
+            FileSystemEntityType.notFound &&
+        FileSystemEntity.typeSync(destination, followLinks: false) !=
+            FileSystemEntityType.directory) {
       destination = p.join(parent, '$stem ($suffix)');
       suffix++;
     }
@@ -569,17 +568,13 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               .toList()
         : <int>[];
     try {
-      final result = await _run(
-        '解压',
-        ArchiveRequest(
-          'extract',
-          archive,
-          destination: destination,
-          removeRedundantRoot: _preferences.removeRedundantRoot,
-          codePage: _archiveCodePage,
-          password: password,
-          indices: indices,
-        ),
+      final result = await _runExtraction(
+        archive,
+        destination,
+        password: password,
+        codePage: _archiveCodePage,
+        indices: indices,
+        intoExisting: Directory(destination).existsSync(),
       );
       if (result != null && mounted) {
         setState(() {
@@ -591,6 +586,108 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     } catch (error) {
       await _error(error);
     }
+  }
+
+  Future<Map<String, dynamic>?> _runExtraction(
+    String archive,
+    String destination, {
+    required String password,
+    required int codePage,
+    required bool intoExisting,
+    bool finder = false,
+    List<int> indices = const [],
+  }) async {
+    var policy = ExtractionPolicy.fail;
+    var expectedVersion = '';
+    while (mounted) {
+      try {
+        return await _run(
+          '解压',
+          ArchiveRequest(
+            intoExisting ? 'extractHere' : 'extract',
+            archive,
+            destination: destination,
+            removeRedundantRoot: _preferences.removeRedundantRoot,
+            password: password,
+            codePage: codePage,
+            indices: indices,
+            extractionPolicy: policy,
+            expectedDestinationVersion: expectedVersion,
+          ),
+        );
+      } on ArchiveFailure catch (error) {
+        if (error.conflicts.isEmpty || !mounted) rethrow;
+        ExtractionPolicy? choice;
+        if (finder) {
+          final value = await _desktop.invokeMethod<String>(
+            'finderExtractionConflict',
+            {'paths': error.conflicts, 'destination': destination},
+          );
+          choice = ExtractionPolicy.values
+              .where((item) => item.name == value)
+              .firstOrNull;
+        } else {
+          choice = await showDialog<ExtractionPolicy>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('解压目标存在同名项目'),
+              content: SizedBox(
+                width: 420,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('以下 ${error.conflicts.length} 个项目已存在。选择的方式应用于本次解压。'),
+                      const SizedBox(height: 8),
+                      Text(error.conflicts.take(8).join('\n')),
+                      const SizedBox(height: 12),
+                      for (final option in [
+                        (ExtractionPolicy.skip, '跳过同名文件', '合并文件夹，保留已有同名项目'),
+                        (ExtractionPolicy.rename, '自动改名', '为同名文件或文件夹添加递增编号'),
+                        (ExtractionPolicy.merge, '合并目录', '保留目录内其他内容，文件重名时再次询问'),
+                        (
+                          ExtractionPolicy.overwrite,
+                          '替换同名文件',
+                          '合并文件夹，仅替换普通文件，需再次确认',
+                        ),
+                      ])
+                        ListTile(
+                          key: ValueKey('extractionPolicy:${option.$1.name}'),
+                          dense: true,
+                          title: Text(option.$2),
+                          subtitle: Text(option.$3),
+                          onTap: () => Navigator.pop(context, option.$1),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('取消解压'),
+                ),
+              ],
+            ),
+          );
+          if (choice == ExtractionPolicy.overwrite && mounted) {
+            final confirmed = await _confirm(
+              '替换已有文件？',
+              '本次解压中同名的普通文件将被替换。文件夹会合并，其他文件会保留。',
+            );
+            if (!confirmed) choice = null;
+          }
+        }
+        if (choice == null || choice == ExtractionPolicy.fail || !mounted) {
+          if (mounted) setState(() => _status = '解压已取消');
+          return null;
+        }
+        policy = choice;
+        expectedVersion = error.destinationVersion;
+      }
+    }
+    return null;
   }
 
   Future<void> _test() async {

@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <copyfile.h>
 #include <map>
 #include <regex>
@@ -36,6 +37,8 @@ using namespace bit7z;
 struct Job {
     uint32_t codePage = 0;
     uint64_t volumeSize = 0;
+    uint32_t extractionPolicy = 0;
+    std::string expectedDestinationVersion;
     std::atomic<uint64_t> total{0};
     std::atomic<uint64_t> completed{0};
     std::atomic<bool> cancelled{false};
@@ -78,6 +81,8 @@ static void callbacks(BitAbstractArchiveHandler& handler, Job* job) {
 class StagingDirectory {
 public:
     localfs::path path;
+    bool preserve = false;
+    int descriptor = -1;
     explicit StagingDirectory(const localfs::path& parent) {
         auto pattern = (parent / ".f7zip-XXXXXX").string();
         std::vector<char> buffer(pattern.begin(), pattern.end());
@@ -85,10 +90,20 @@ public:
         char* created = mkdtemp(buffer.data());
         if (!created) throw std::runtime_error("无法创建临时目录，请检查目标目录权限与磁盘空间");
         path = created;
+        descriptor = open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (descriptor < 0) {
+            localfs::remove(path);
+            throw std::runtime_error("无法打开临时目录");
+        }
+    }
+    localfs::path currentPath() const {
+        char buffer[PATH_MAX];
+        return fcntl(descriptor, F_GETPATH, buffer) == 0 ? localfs::path(buffer) : path;
     }
     ~StagingDirectory() {
         std::error_code ignored;
-        localfs::remove_all(path, ignored);
+        if (!preserve) localfs::remove_all(currentPath(), ignored);
+        close(descriptor);
     }
 };
 
@@ -319,6 +334,235 @@ public:
         : std::runtime_error("添加的文件与压缩包内文件重名"), paths(std::move(values)) {}
 };
 
+// 通过目录描述符访问目标，防止合并时沿符号链接写到目标目录以外。
+class ExtractionDirectory {
+public:
+    int descriptor;
+    std::shared_ptr<ExtractionDirectory> parent;
+    localfs::path root;
+    std::string name;
+    struct stat identity{};
+
+    ExtractionDirectory(const localfs::path& path) : root(path) {
+        descriptor = open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        initialize();
+    }
+    ExtractionDirectory(std::shared_ptr<ExtractionDirectory> owner, const std::string& child)
+        : parent(std::move(owner)), name(child) {
+        descriptor = openat(parent->descriptor, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        initialize();
+    }
+    ~ExtractionDirectory() {
+        if (descriptor >= 0) { flock(descriptor, LOCK_UN); close(descriptor); }
+    }
+    void verify() const {
+        struct stat current{};
+        if (parent) parent->verify();
+        const int status = parent
+            ? fstatat(parent->descriptor, name.c_str(), &current, AT_SYMLINK_NOFOLLOW)
+            : lstat(root.c_str(), &current);
+        if (status != 0 || current.st_dev != identity.st_dev || current.st_ino != identity.st_ino || !S_ISDIR(current.st_mode)) {
+            throw std::runtime_error("解压目标目录已变化，请检查后重试");
+        }
+    }
+private:
+    void initialize() {
+        if (descriptor < 0) throw std::runtime_error("无法安全打开解压目标目录");
+        if (fstat(descriptor, &identity) != 0 || flock(descriptor, LOCK_EX | LOCK_NB) != 0) {
+            close(descriptor);
+            descriptor = -1;
+            throw std::runtime_error("解压目标正在被其他任务写入，请稍后重试");
+        }
+    }
+};
+
+static bool sameExtractedFile(const struct stat& left, const struct stat& right, bool renamed = false) {
+    return left.st_dev == right.st_dev && left.st_ino == right.st_ino &&
+        left.st_mode == right.st_mode && left.st_size == right.st_size &&
+        left.st_mtimespec.tv_sec == right.st_mtimespec.tv_sec && left.st_mtimespec.tv_nsec == right.st_mtimespec.tv_nsec &&
+        (renamed || (left.st_ctimespec.tv_sec == right.st_ctimespec.tv_sec && left.st_ctimespec.tv_nsec == right.st_ctimespec.tv_nsec));
+}
+
+class ExtractionConflict : public std::runtime_error {
+public:
+    std::vector<std::string> paths;
+    std::string version;
+    ExtractionConflict(std::vector<std::string> values, std::string snapshot)
+        : std::runtime_error("解压目标存在同名项目，请选择处理方式"), paths(std::move(values)), version(std::move(snapshot)) {}
+};
+
+static std::string extractionStatus(const struct stat& status) {
+    std::ostringstream version;
+    version << status.st_dev << ',' << status.st_ino << ',' << status.st_mode;
+    if (!S_ISDIR(status.st_mode)) {
+        version << ',' << status.st_size << ',' << status.st_mtimespec.tv_sec << ',' << status.st_mtimespec.tv_nsec
+            << ',' << status.st_ctimespec.tv_sec << ',' << status.st_ctimespec.tv_nsec;
+    }
+    return version.str();
+}
+
+static void extractionVersions(const localfs::path& source, const std::shared_ptr<ExtractionDirectory>& directory,
+    std::map<std::string, std::string>& versions, Job* job, const localfs::path& relative = {}) {
+    for (const auto& entry : localfs::directory_iterator(source)) {
+        checkCancellation(job);
+        const auto name = entry.path().filename().string();
+        const auto key = (relative / name).string();
+        struct stat status{};
+        if (fstatat(directory->descriptor, name.c_str(), &status, AT_SYMLINK_NOFOLLOW) != 0) {
+            if (errno != ENOENT) throw std::runtime_error("无法检查解压目标文件状态");
+            versions[key] = "missing";
+            continue;
+        }
+        versions[key] = extractionStatus(status);
+        if (S_ISDIR(status.st_mode) && localfs::is_directory(localfs::symlink_status(entry.path()))) {
+            auto child = std::make_shared<ExtractionDirectory>(directory, name);
+            if (child->identity.st_dev != status.st_dev || child->identity.st_ino != status.st_ino) {
+                throw std::runtime_error("解压目标目录已变化，请检查后重试");
+            }
+            extractionVersions(entry.path(), child, versions, job, relative / name);
+        }
+    }
+}
+
+struct ExtractionMove {
+    localfs::path source;
+    std::shared_ptr<ExtractionDirectory> directory;
+    std::string name;
+    struct stat expected{};
+    struct stat published{};
+    bool replace = false;
+    bool committed = false;
+};
+
+// 先生成完整计划，再发布。合并已有目录时，保留其余文件与目录自身的元数据。
+static void planExtraction(const localfs::path& source, const std::shared_ptr<ExtractionDirectory>& directory,
+    uint32_t policy, const std::map<std::string, std::string>& versions, std::vector<ExtractionMove>& moves, std::vector<std::string>& conflicts, Job* job,
+    const localfs::path& relative = {}) {
+    std::set<std::string> reserved;
+    for (const auto& entry : localfs::directory_iterator(source)) reserved.insert(entry.path().filename().string());
+    for (const auto& entry : localfs::directory_iterator(source)) {
+        checkCancellation(job);
+        const auto original = entry.path().filename().string();
+        auto name = original;
+        struct stat existing{};
+        const int status = fstatat(directory->descriptor, name.c_str(), &existing, AT_SYMLINK_NOFOLLOW);
+        if (status != 0 && errno != ENOENT) throw std::runtime_error("无法读取目标文件状态，请检查目录权限");
+        const bool exists = status == 0;
+        const auto snapshot = versions.at((relative / original).string());
+        if (snapshot != (exists ? extractionStatus(existing) : "missing")) {
+            throw std::runtime_error("规划期间解压目标已变化，请检查后重试");
+        }
+        const bool sourceDirectory = localfs::is_directory(localfs::symlink_status(entry.path()));
+        if (exists && policy != 0 && policy != 2 && sourceDirectory && S_ISDIR(existing.st_mode)) {
+            auto child = std::make_shared<ExtractionDirectory>(directory, name);
+            if (child->identity.st_dev != existing.st_dev || child->identity.st_ino != existing.st_ino) {
+                throw std::runtime_error("合并目录已变化，请检查后重试");
+            }
+            planExtraction(entry.path(), child, policy, versions, moves, conflicts, job, relative / original);
+            continue;
+        }
+        if (exists && policy == 1) continue;
+        if (exists && policy == 2) {
+            const auto base = sourceDirectory ? original : entry.path().stem().string();
+            const auto extension = sourceDirectory ? "" : entry.path().extension().string();
+            unsigned int index = 2;
+            do {
+                name = base + " (" + std::to_string(index++) + ")" + extension;
+                if (reserved.count(name)) continue;
+                if (fstatat(directory->descriptor, name.c_str(), &existing, AT_SYMLINK_NOFOLLOW) != 0) {
+                    if (errno == ENOENT) break;
+                    throw std::runtime_error("无法检查自动改名的目标位置");
+                }
+            } while (true);
+            reserved.insert(name);
+        } else if (exists && (policy != 4 || sourceDirectory || !S_ISREG(existing.st_mode))) {
+            conflicts.push_back((relative / original).string());
+            continue;
+        }
+        moves.push_back({entry.path(), directory, name, existing, {}, exists && policy == 4, false});
+    }
+}
+
+static void publishExtraction(const localfs::path& source, const localfs::path& target, Job* job, StagingDirectory& staging, const localfs::path& archive, const struct stat& targetIdentity) {
+    ExtractionDirectory stagedRoot(source);
+    auto directory = std::make_shared<ExtractionDirectory>(target);
+    if (directory->identity.st_dev != targetIdentity.st_dev || directory->identity.st_ino != targetIdentity.st_ino) {
+        throw std::runtime_error("解压期间目标目录已变化，请检查后重试");
+    }
+    std::map<std::string, std::string> versions;
+    extractionVersions(source, directory, versions, job);
+    std::string version = std::to_string(directory->identity.st_dev) + "," + std::to_string(directory->identity.st_ino);
+    for (const auto& [name, status] : versions) version += "\n" + quote(name) + "=" + status;
+    if (!job->expectedDestinationVersion.empty() && version != job->expectedDestinationVersion) {
+        throw std::runtime_error("确认期间解压目标已变化，请重新发起解压并核对冲突");
+    }
+    std::vector<ExtractionMove> moves;
+    std::vector<std::string> conflicts;
+    planExtraction(source, directory, job->extractionPolicy, versions, moves, conflicts, job);
+    if (!conflicts.empty()) throw ExtractionConflict(std::move(conflicts), version);
+    std::set<std::pair<dev_t, ino_t>> inputs;
+    const auto archivePath = localfs::absolute(archive);
+    const auto family = volumeFamily(archivePath.filename().string());
+    for (const auto& entry : localfs::directory_iterator(archivePath.parent_path())) {
+        if (entry.path() != archivePath && (family.empty() || volumeFamily(entry.path().filename().string()) != family)) continue;
+        struct stat status{};
+        if (stat(entry.path().c_str(), &status) == 0) inputs.emplace(status.st_dev, status.st_ino);
+    }
+    for (const auto& move : moves) {
+        if (move.replace && inputs.count({move.expected.st_dev, move.expected.st_ino})) {
+            throw std::runtime_error("解压结果不能替换原压缩包或其分卷，请选择跳过或自动改名");
+        }
+    }
+    std::sort(moves.begin(), moves.end(), [](const auto& left, const auto& right) { return left.source < right.source; });
+    try {
+        for (auto& move : moves) {
+            checkCancellation(job);
+            move.directory->verify();
+            struct stat current{};
+            const int status = fstatat(move.directory->descriptor, move.name.c_str(), &current, AT_SYMLINK_NOFOLLOW);
+            if (move.replace && (status != 0 || !sameExtractedFile(move.expected, current))) {
+                throw std::runtime_error("待替换文件已变化，请检查后重试");
+            }
+            if (!move.replace && (status == 0 || errno != ENOENT)) {
+                throw std::runtime_error("发布期间出现同名项目，请检查后重试");
+            }
+            const auto stagedName = move.source.lexically_relative(source);
+            if (fstatat(stagedRoot.descriptor, stagedName.c_str(), &move.published, AT_SYMLINK_NOFOLLOW) != 0) throw std::runtime_error("无法读取暂存结果");
+            // 交换后旧文件保留在私有暂存目录，直到整组发布成功。
+            const unsigned int flags = move.replace ? RENAME_SWAP : RENAME_EXCL;
+            if (renameatx_np(stagedRoot.descriptor, stagedName.c_str(), move.directory->descriptor, move.name.c_str(), flags) != 0) {
+                throw std::runtime_error("无法保存解压结果，请检查同名项目或目录权限");
+            }
+            move.committed = true;
+            if (move.replace && (fstatat(stagedRoot.descriptor, stagedName.c_str(), &current, AT_SYMLINK_NOFOLLOW) != 0 || !sameExtractedFile(move.expected, current, true))) {
+                throw std::runtime_error("替换期间目标文件已变化，请检查后重试");
+            }
+        }
+        checkCancellation(job);
+        for (const auto& move : moves) move.directory->verify();
+    } catch (...) {
+        bool restored = true;
+        for (auto iterator = moves.rbegin(); iterator != moves.rend(); ++iterator) {
+            auto& move = *iterator;
+            if (!move.committed) continue;
+            const auto stagedName = move.source.lexically_relative(source);
+            struct stat current{};
+            if (fstatat(move.directory->descriptor, move.name.c_str(), &current, AT_SYMLINK_NOFOLLOW) != 0 ||
+                !sameExtractedFile(move.published, current, true) ||
+                renameatx_np(move.directory->descriptor, move.name.c_str(), stagedRoot.descriptor, stagedName.c_str(),
+                             move.replace ? RENAME_SWAP : RENAME_EXCL) != 0) {
+                restored = false;
+            }
+        }
+        if (!restored) {
+            // 回滚受外部写入阻挡时，保留旧文件，避免清理暂存目录造成数据丢失。
+            staging.preserve = true;
+            throw std::runtime_error("目标被并发修改，部分结果需手动核对。原文件与暂存结果保留于 " + staging.currentPath().string());
+        }
+        throw;
+    }
+}
+
 static void applyArchiveMutation(BitArchiveEditor& editor, const std::vector<BitArchiveItemInfo>& items,
     const std::string& action, const char* itemPath, const char* destination,
     const char* const* inputs, int inputCount, const localfs::path& archive, const localfs::path& staging, Job* job) {
@@ -448,6 +692,11 @@ __attribute__((visibility("default"))) void f7_job_codepage(Job* job, uint32_t c
 
 __attribute__((visibility("default"))) void f7_job_volume_size(Job* job, uint64_t size) {
     job->volumeSize = size;
+}
+
+__attribute__((visibility("default"))) void f7_job_extraction_options(Job* job, uint32_t policy, const char* expectedVersion) {
+    job->extractionPolicy = policy;
+    job->expectedDestinationVersion = expectedVersion;
 }
 
 __attribute__((visibility("default"))) void f7_free(char* value) { free(value); }
@@ -601,10 +850,16 @@ __attribute__((visibility("default"))) char* f7_run(
         }
         if (op != "extract" && op != "extractHere" && op != "extractFlat" && op != "extractHereFlat") throw std::runtime_error("未知操作");
         for (const auto& item : reader.items()) validateEntry(item);
-        localfs::path target(destination);
+        if (job->extractionPolicy > 4) throw std::runtime_error("无效的解压同名处理方式");
+        localfs::path target = localfs::absolute(destination);
         const bool intoExisting = op == "extractHere" || op == "extractHereFlat";
         if (intoExisting && !localfs::is_directory(target)) throw std::runtime_error("目标文件夹不存在");
         if (!intoExisting && localfs::exists(target)) throw std::runtime_error("目标目录已存在，请选择新目录名");
+        struct stat targetIdentity{};
+        if (intoExisting) {
+            target = localfs::canonical(target);
+            if (lstat(target.c_str(), &targetIdentity) != 0) throw std::runtime_error("无法读取解压目标目录状态");
+        }
         StagingDirectory staging(intoExisting ? target : target.parent_path());
         if (indexCount > 0) {
             std::vector<uint32_t> selected(indices, indices + indexCount);
@@ -616,9 +871,17 @@ __attribute__((visibility("default"))) char* f7_run(
         checkCancellation(job);
         if (volumeVersion(archive) != initialVolumes) throw std::runtime_error("解压期间压缩包或分卷已变化，请重新打开");
         const auto root = extractionRoot(staging.path, op == "extractFlat" || op == "extractHereFlat");
-        if (intoExisting) publishContents(root, target);
-        else publish(root, target);
+        if (intoExisting) publishExtraction(root, target, job, staging, archive, targetIdentity);
+        else {
+            publish(root, target);
+            // 整个暂存目录已成为用户结果，清理职责随发布转移。
+            if (root == staging.path) staging.preserve = true;
+        }
         return result("{\"ok\":true,\"version\":" + quote(readVersion) + ",\"path\":" + quote(target.string()) + "}");
+    } catch (const ExtractionConflict& conflict) {
+        std::string paths = "[";
+        for (const auto& path : conflict.paths) { if (paths.size() > 1) paths += ','; paths += quote(path); }
+        return result("{\"ok\":false,\"error\":" + quote(conflict.what()) + ",\"destinationVersion\":" + quote(conflict.version) + ",\"conflicts\":" + paths + "]}");
     } catch (const BitException& error) {
         const bool passwordRequired = error.code() == BitFailureSource::WrongPassword;
         const auto message = multiVolume && !passwordRequired

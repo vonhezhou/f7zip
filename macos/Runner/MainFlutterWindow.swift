@@ -33,6 +33,26 @@ class MainFlutterWindow: NSWindow {
         alert.window.initialFirstResponder = field
         NSApp.activate(ignoringOtherApps: true)
         result(alert.runModal() == .alertFirstButtonReturn ? field.stringValue : nil)
+      case "finderExtractionConflict":
+        let arguments = call.arguments as? [String: Any] ?? [:]
+        let paths = arguments["paths"] as? [String] ?? []
+        let alert = NSAlert()
+        alert.messageText = "解压目标存在同名项目"
+        alert.informativeText = "选择的方式应用于本次解压。跳过、合并与替换会合并同名文件夹，替换仅适用于普通文件。\n\n" + paths.prefix(8).joined(separator: "\n")
+        let choices = [("取消解压", ""), ("跳过同名文件", "skip"), ("自动改名", "rename"), ("合并目录", "merge"), ("替换同名文件", "overwrite")]
+        for choice in choices { alert.addButton(withTitle: choice.0) }
+        NSApp.activate(ignoringOtherApps: true)
+        let index = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        var choice = choices.indices.contains(index) ? choices[index].1 : ""
+        if choice == "overwrite" {
+          let confirmation = NSAlert()
+          confirmation.messageText = "替换已有文件？"
+          confirmation.informativeText = "本次解压中同名的普通文件将被替换。文件夹会合并，其他文件会保留。"
+          confirmation.addButton(withTitle: "取消")
+          confirmation.addButton(withTitle: "确认替换")
+          if confirmation.runModal() != .alertSecondButtonReturn { choice = "" }
+        }
+        result(choice.isEmpty ? nil : choice)
       case "finderError":
         let alert = NSAlert()
         alert.messageText = "操作未完成"

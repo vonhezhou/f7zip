@@ -6,6 +6,15 @@ import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 import 'package:path/path.dart' as p;
 
+typedef _ExtractionOptionsNative = Void Function(
+  Pointer<Void>,
+  Uint32,
+  Pointer<Utf8>,
+);
+typedef _ExtractionOptions = void Function(Pointer<Void>, int, Pointer<Utf8>);
+
+enum ExtractionPolicy { fail, skip, rename, merge, overwrite }
+
 typedef _VolumeSizeNative = Void Function(Pointer<Void>, Uint64);
 typedef _VolumeSize = void Function(Pointer<Void>, int);
 
@@ -159,6 +168,8 @@ class ArchiveRequest {
     this.password = '',
     this.codePage = 0,
     this.volumeSize = 0,
+    this.extractionPolicy = ExtractionPolicy.fail,
+    this.expectedDestinationVersion = '',
     this.format = 'zip',
     this.level = 5,
     this.inputs = const [],
@@ -174,6 +185,8 @@ class ArchiveRequest {
   final String password;
   final int codePage;
   final int volumeSize;
+  final ExtractionPolicy extractionPolicy;
+  final String expectedDestinationVersion;
   final String format;
   final int level;
   final List<String> inputs;
@@ -187,12 +200,14 @@ class ArchiveFailure implements Exception {
     this.passwordRequired = false,
     this.volumeError = false,
     this.conflicts = const [],
+    this.destinationVersion = '',
   });
   final String message;
   final bool cancelled;
   final bool passwordRequired;
   final bool volumeError;
   final List<String> conflicts;
+  final String destinationVersion;
   @override
   String toString() => message;
 }
@@ -246,6 +261,7 @@ class ArchiveEngine {
           passwordRequired: response['passwordRequired'] == true,
           volumeError: response['volumeError'] == true,
           conflicts: (response['conflicts'] as List? ?? []).cast<String>(),
+          destinationVersion: response['destinationVersion'] as String? ?? '',
         );
       }
       return response;
@@ -298,6 +314,13 @@ Map<String, dynamic> _execute(
     library.lookupFunction<_VolumeSizeNative, _VolumeSize>(
       'f7_job_volume_size',
     )(job, request.volumeSize);
+    library.lookupFunction<_ExtractionOptionsNative, _ExtractionOptions>(
+      'f7_job_extraction_options',
+    )(
+      job,
+      request.extractionPolicy.index,
+      utf8(request.expectedDestinationVersion),
+    );
     final engine = utf8(p.join(directory, '7z.so'));
     Pointer<Utf8> response;
     if (request.operation == 'update') {

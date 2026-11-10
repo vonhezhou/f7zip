@@ -12,6 +12,7 @@ class AppSettings {
     this.singleClickOpen = true,
     this.showDotEntries = true,
     this.removeRedundantRoot = false,
+    this.smartExtraction = false,
     this.viewer = '',
     this.editor = '',
     this.themeMode = ThemeMode.system,
@@ -24,6 +25,7 @@ class AppSettings {
     singleClickOpen: json['singleClickOpen'] as bool? ?? true,
     showDotEntries: json['showDotEntries'] as bool? ?? true,
     removeRedundantRoot: json['removeRedundantRoot'] as bool? ?? false,
+    smartExtraction: json['smartExtraction'] as bool? ?? false,
     viewer: json['viewer'] as String? ?? '',
     editor: json['editor'] as String? ?? '',
     themeMode: ThemeMode.values.firstWhere(
@@ -44,6 +46,7 @@ class AppSettings {
   final bool singleClickOpen;
   final bool showDotEntries;
   final bool removeRedundantRoot;
+  final bool smartExtraction;
   final String viewer;
   final String editor;
   final ThemeMode themeMode;
@@ -55,6 +58,7 @@ class AppSettings {
     'singleClickOpen': singleClickOpen,
     'showDotEntries': showDotEntries,
     'removeRedundantRoot': removeRedundantRoot,
+    'smartExtraction': smartExtraction,
     'viewer': viewer,
     'editor': editor,
     'themeMode': themeMode.name,
@@ -77,6 +81,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late bool _alternateRows = widget.initial.alternateRows;
   late bool _singleClickOpen = widget.initial.singleClickOpen;
   late bool _showDotEntries = widget.initial.showDotEntries;
+  late bool _smartExtraction = widget.initial.smartExtraction;
   late bool _removeRedundantRoot = widget.initial.removeRedundantRoot;
   late final _viewer = TextEditingController(text: widget.initial.viewer);
   late final _editor = TextEditingController(text: widget.initial.editor);
@@ -157,6 +162,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       singleClickOpen: _singleClickOpen,
       showDotEntries: _showDotEntries,
       removeRedundantRoot: _removeRedundantRoot,
+      smartExtraction: _smartExtraction,
       viewer: _viewer.text.trim(),
       editor: _editor.text.trim(),
     );
@@ -307,6 +313,16 @@ class _SettingsDialogState extends State<SettingsDialog> {
                               ),
                             ),
                             const Divider(height: 1),
+                            SwitchListTile(
+                              key: const ValueKey('smartExtraction'),
+                              title: const Text('智能选择解压目录'),
+                              subtitle: const Text(
+                                '单文件或单目录直接解压到所选位置，多项目使用压缩包名称的文件夹；Finder 原地解压直接使用同级目录',
+                              ),
+                              value: _smartExtraction,
+                              onChanged: (value) =>
+                                  setState(() => _smartExtraction = value),
+                            ),
                             SwitchListTile(
                               title: const Text('解压时删除冗余的根目录'),
                               subtitle: const Text(

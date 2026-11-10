@@ -364,7 +364,11 @@ Map<String, dynamic> _execute(
         engine,
         utf8(
           request.removeRedundantRoot &&
-                  const {'extract', 'extractHere'}.contains(request.operation)
+                  const {
+                    'extract',
+                    'extractHere',
+                    'extractSmart',
+                  }.contains(request.operation)
               ? '${request.operation}Flat'
               : request.operation,
         ),

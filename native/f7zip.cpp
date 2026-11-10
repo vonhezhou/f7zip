@@ -935,7 +935,7 @@ static std::vector<localfs::path> preparePublishedLinks(const localfs::path& sou
     return published;
 }
 
-static void publishExtraction(const localfs::path& source, const localfs::path& target, Job* job, StagingDirectory& staging, const localfs::path& archive, const struct stat& targetIdentity, ExtractionPermissions& permissions) {
+static localfs::path publishExtraction(const localfs::path& source, const localfs::path& target, Job* job, StagingDirectory& staging, const localfs::path& archive, const struct stat& targetIdentity, ExtractionPermissions& permissions, const localfs::path& outputRelative = {}) {
     ExtractionDirectory stagedRoot(source);
     auto directory = std::make_shared<ExtractionDirectory>(target);
     if (directory->identity.st_dev != targetIdentity.st_dev || directory->identity.st_ino != targetIdentity.st_ino) {
@@ -953,6 +953,7 @@ static void publishExtraction(const localfs::path& source, const localfs::path& 
     planExtraction(source, directory, job->extractionPolicy, versions, moves, conflicts, job);
     if (!conflicts.empty()) throw ExtractionConflict(std::move(conflicts), version);
     const auto publishedLinks = preparePublishedLinks(source, moves);
+    const auto publishedOutput = outputRelative.empty() ? localfs::path{} : publishedExtractionPath(source / outputRelative, source, moves);
     std::set<std::pair<dev_t, ino_t>> inputs;
     const auto archivePath = localfs::absolute(archive);
     const auto family = volumeFamily(archivePath.filename().string());
@@ -1025,6 +1026,7 @@ static void publishExtraction(const localfs::path& source, const localfs::path& 
         }
         throw;
     }
+    return publishedOutput;
 }
 
 static void applyArchiveMutation(BitArchiveEditor& editor, const std::vector<BitArchiveItemInfo>& items,
@@ -1231,7 +1233,7 @@ __attribute__((visibility("default"))) char* f7_job_progress(Job* job) {
         ",\"file\":" + quote(job->currentFile) + "}");
 }
 
-// operation 为 list / extract / extractHere / extractFlat / extractHereFlat / test / compress，所有字符串使用 UTF-8。
+// operation 为 list / extract / extractHere / extractSmart / test / compress，解压操作可加 Flat 后缀，所有字符串使用 UTF-8。
 __attribute__((visibility("default"))) char* f7_run(
     Job* job, const char* engine, const char* operation, const char* archive,
     const char* destination, const char* password, const char* format, int level,
@@ -1383,14 +1385,20 @@ __attribute__((visibility("default"))) char* f7_run(
             if (volumeVersion(archive) != initialVolumes) throw std::runtime_error("测试期间压缩包或分卷已变化，请重新打开");
             return result("{\"ok\":true}");
         }
-        if (op != "extract" && op != "extractHere" && op != "extractFlat" && op != "extractHereFlat") throw std::runtime_error("未知操作");
+        const bool smart = op == "extractSmart" || op == "extractSmartFlat";
+        if (op != "extract" && op != "extractHere" && op != "extractFlat" && op != "extractHereFlat" && !smart) throw std::runtime_error("未知操作");
         if (job->extractionPolicy > 4) throw std::runtime_error("无效的解压同名处理方式");
         localfs::path target = localfs::absolute(destination);
-        const bool intoExisting = op == "extractHere" || op == "extractHereFlat";
+        bool intoExisting = op == "extractHere" || op == "extractHereFlat";
         if (intoExisting && !localfs::is_directory(target)) throw std::runtime_error("目标文件夹不存在");
-        if (!intoExisting && localfs::exists(target)) throw std::runtime_error("目标目录已存在，请选择新目录名");
-        struct stat targetIdentity{};
-        if (intoExisting) {
+        if (!intoExisting && !smart && localfs::exists(target)) throw std::runtime_error("目标目录已存在，请选择新目录名");
+        struct stat targetIdentity{}, parentIdentity{};
+        bool targetWasDirectory = false;
+        if (smart) {
+            target = localfs::canonical(target.parent_path()) / target.filename();
+            if (lstat(target.parent_path().c_str(), &parentIdentity) != 0) throw std::runtime_error("无法读取解压父目录状态");
+            targetWasDirectory = lstat(target.c_str(), &targetIdentity) == 0 && S_ISDIR(targetIdentity.st_mode);
+        } else if (intoExisting) {
             target = localfs::canonical(target);
             if (lstat(target.c_str(), &targetIdentity) != 0) throw std::runtime_error("无法读取解压目标目录状态");
         }
@@ -1399,8 +1407,27 @@ __attribute__((visibility("default"))) char* f7_run(
         extractSafely(reader, staging.path, indices, indexCount, job, permissions);
         checkCancellation(job);
         if (volumeVersion(archive) != initialVolumes) throw std::runtime_error("解压期间压缩包或分卷已变化，请重新打开");
-        const auto root = extractionRoot(staging.path, op == "extractFlat" || op == "extractHereFlat");
-        if (intoExisting) publishExtraction(root, target, job, staging, archive, targetIdentity, permissions);
+        const auto root = extractionRoot(staging.path, op == "extractFlat" || op == "extractHereFlat" || op == "extractSmartFlat");
+        localfs::path outputRelative;
+        if (smart) {
+            auto entry = localfs::directory_iterator(root);
+            if (entry != localfs::directory_iterator()) {
+                const auto only = entry->path().filename();
+                if (++entry == localfs::directory_iterator()) {
+                    // 单文件或单目录直接落到所选父目录，避免再套一层同名目录。
+                    outputRelative = only;
+                    target = target.parent_path();
+                    targetIdentity = parentIdentity;
+                    intoExisting = true;
+                }
+            }
+            if (outputRelative.empty()) intoExisting = targetWasDirectory;
+        }
+        auto resultPath = target;
+        if (intoExisting) {
+            const auto published = publishExtraction(root, target, job, staging, archive, targetIdentity, permissions, outputRelative);
+            if (!published.empty()) resultPath /= published;
+        }
         else {
             validateMaterializedLinks(root);
             permissions.apply();
@@ -1409,7 +1436,7 @@ __attribute__((visibility("default"))) char* f7_run(
             if (root == staging.path) staging.preserve = true;
         }
         permissions.commit();
-        return result("{\"ok\":true,\"version\":" + quote(readVersion) + ",\"path\":" + quote(target.string()) + "}");
+        return result("{\"ok\":true,\"version\":" + quote(readVersion) + ",\"path\":" + quote(resultPath.string()) + "}");
     } catch (const ExtractionConflict& conflict) {
         std::string paths = "[";
         for (const auto& path : conflict.paths) { if (paths.size() > 1) paths += ','; paths += quote(path); }

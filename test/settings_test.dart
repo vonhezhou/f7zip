@@ -134,7 +134,14 @@ void main() {
       Theme.of(tester.element(find.byType(Scaffold))).colorScheme,
       buildAppTheme(Brightness.light).colorScheme,
     );
-    await tester.ensureVisible(find.text('单击打开文件和文件夹'));
+    await tester.scrollUntilVisible(
+      find.text('单击打开文件和文件夹'),
+      100,
+      scrollable: find.descendant(
+        of: find.byType(ListView).first,
+        matching: find.byType(Scrollable),
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('单击打开文件和文件夹'));
     await tester.pumpAndSettle();

@@ -303,15 +303,18 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         try {
           final result = await _runExtraction(
             path,
-            parent ?? p.dirname(path),
+            chooseFolder && _preferences.smartExtraction
+                ? _extractionDestination(parent!, path)
+                : parent ?? p.dirname(path),
             password: password,
             codePage: _preferences.filenameEncoding.codePage,
             intoExisting: true,
             finder: true,
+            smartDestination: chooseFolder && _preferences.smartExtraction,
           );
           if (result == null || !mounted) return;
           setState(() {
-            _lastOutput = parent ?? p.dirname(path);
+            _lastOutput = result['path'] as String;
             _status = '解压完成 · ${p.basename(path)}';
           });
           break;
@@ -551,16 +554,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       parent = paths.first;
     }
     if (!mounted || !_available) return;
-    final stem = _archiveStem(archive);
-    var destination = p.join(parent, stem);
-    var suffix = 2;
-    while (FileSystemEntity.typeSync(destination, followLinks: false) !=
-            FileSystemEntityType.notFound &&
-        FileSystemEntity.typeSync(destination, followLinks: false) !=
-            FileSystemEntityType.directory) {
-      destination = p.join(parent, '$stem ($suffix)');
-      suffix++;
-    }
+    final destination = _extractionDestination(parent, archive);
     final indices = selectedOnly
         ? _entries
               .where((entry) => entry.isSelectedBy(_selected))
@@ -575,12 +569,13 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         codePage: _archiveCodePage,
         indices: indices,
         intoExisting: Directory(destination).existsSync(),
+        smartDestination: _preferences.smartExtraction,
       );
       if (result != null && mounted) {
         setState(() {
           _password = password;
-          _lastOutput = destination;
-          _status = '解压完成 · $destination';
+          _lastOutput = result['path'] as String;
+          _status = '解压完成 · $_lastOutput';
         });
       }
     } catch (error) {
@@ -595,6 +590,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     required int codePage,
     required bool intoExisting,
     bool finder = false,
+    bool smartDestination = false,
     List<int> indices = const [],
   }) async {
     var policy = ExtractionPolicy.fail;
@@ -604,7 +600,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         return await _run(
           '解压',
           ArchiveRequest(
-            intoExisting ? 'extractHere' : 'extract',
+            smartDestination
+                ? 'extractSmart'
+                : intoExisting
+                ? 'extractHere'
+                : 'extract',
             archive,
             destination: destination,
             removeRedundantRoot: _preferences.removeRedundantRoot,
@@ -3286,6 +3286,20 @@ class _CompressionDialogState extends State<_CompressionDialog> {
       ),
     ],
   );
+}
+
+String _extractionDestination(String parent, String archive) {
+  final stem = _archiveStem(archive);
+  var destination = p.join(parent, stem);
+  var suffix = 2;
+  while (FileSystemEntity.typeSync(destination, followLinks: false) !=
+          FileSystemEntityType.notFound &&
+      FileSystemEntity.typeSync(destination, followLinks: false) !=
+          FileSystemEntityType.directory) {
+    destination = p.join(parent, '$stem ($suffix)');
+    suffix++;
+  }
+  return destination;
 }
 
 String _archiveStem(String path) {

@@ -60,10 +60,12 @@ class EditWorkspace {
     required this.update,
     required this.onChanged,
     this.settleTime = const Duration(milliseconds: 700),
+    this.canTryPasswords,
   });
 
   final Directory root;
   final bool Function() canUpdate;
+  final bool Function()? canTryPasswords;
   final Future<String> Function(EditSession session, String snapshot) update;
   final void Function() onChanged;
   final Duration settleTime;
@@ -179,7 +181,9 @@ class EditWorkspace {
               !canUpdate()) {
             continue;
           }
-          if (session.requiresPassword && session.password.isEmpty) {
+          if (session.requiresPassword &&
+              session.password.isEmpty &&
+              !(canTryPasswords?.call() ?? false)) {
             throw const FileSystemException('请点击重试并输入压缩包密码');
           }
           final snapshot = File(p.join(session.directory.path, 'snapshot.tmp'));

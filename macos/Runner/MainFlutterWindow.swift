@@ -6,6 +6,8 @@ import PDFKit
 import ImageIO
 
 class MainFlutterWindow: NSWindow {
+  private let passwordStore = ArchivePasswordStore()
+  private let passwordQueue = DispatchQueue(label: "dev.von.f7zip.passwords")
   private var channel: FlutterMethodChannel?
   private var archiveMenu: ArchiveMenuTarget?
   private var dragSources: [String: ArchiveFileDragSource] = [:]
@@ -62,6 +64,29 @@ class MainFlutterWindow: NSWindow {
         result(nil)
       case "startArchiveDrag":
         self.startArchiveDrag(call.arguments as? [String: Any] ?? [:], view: controller.view, result: result)
+      case "listArchivePasswords", "saveArchivePassword", "deleteArchivePassword", "archivePasswordCandidates":
+        let arguments = call.arguments as? [String: Any] ?? [:]
+        let enabled = UserDefaults.standard.dictionary(forKey: "preferences")?["autoTryPasswords"] as? Bool == true
+        self.passwordQueue.async {
+          do {
+            let response: [String]
+            switch call.method {
+            case "saveArchivePassword":
+              guard let name = arguments["name"] as? String, let password = arguments["password"] as? String else { throw ArchivePasswordStore.StoreError.invalidInput }
+              try self.passwordStore.save(name: name, password: password, replace: arguments["replace"] as? Bool == true)
+              response = try self.passwordStore.names()
+            case "deleteArchivePassword":
+              guard let name = arguments["name"] as? String else { throw ArchivePasswordStore.StoreError.invalidInput }
+              try self.passwordStore.delete(name: name)
+              response = try self.passwordStore.names()
+            case "archivePasswordCandidates": response = enabled ? try self.passwordStore.candidates() : []
+            default: response = try self.passwordStore.names()
+            }
+            DispatchQueue.main.async { result(response) }
+          } catch {
+            DispatchQueue.main.async { result(FlutterError(code: "keychain", message: error.localizedDescription, details: nil)) }
+          }
+        }
       case "finderPassword":
         let arguments = call.arguments as? [String: String] ?? [:]
         let alert = NSAlert()

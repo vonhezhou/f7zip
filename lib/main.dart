@@ -75,6 +75,8 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   String _archiveComment = '';
   bool _editable = false;
   bool _openingFile = false;
+  bool _tryingPasswords = false;
+  final Map<String, String> _operationPasswords = {};
   bool _mutating = false;
   String _sortColumn = 'name';
   bool _sortAscending = true;
@@ -125,7 +127,8 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       _desktopReady && !_busy && !_choosing && _engine != null;
   bool get _available => _engineAvailable && !_exportingDrag;
 
-  bool get _interactive => _available && !_openingFile && !_mutating;
+  bool get _interactive =>
+      _available && !_openingFile && !_mutating && !_tryingPasswords;
 
   @override
   void initState() {
@@ -186,7 +189,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
                 !_openingFile &&
                 !_mutating &&
                 !_handlingFinderRequest &&
+                !_tryingPasswords &&
                 !Navigator.of(context).canPop(),
+            canTryPasswords: () => _preferences.autoTryPasswords,
             update: _writeBack,
             onChanged: () {
               if (mounted) setState(() {});
@@ -214,6 +219,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     _finderTimer?.cancel();
     _edits?.close();
     _engine?.cancel();
+    _operationPasswords.clear();
     for (final session in _dragSessions.values) {
       session.cancelled = true;
       session.expiry?.cancel();
@@ -574,6 +580,92 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     ArchiveRequest request, {
     bool dragExport = false,
   }) async {
+    if (_tryingPasswords) return null;
+    final automatic =
+        _preferences.autoTryPasswords && request.operation != 'compress';
+    if (!automatic) return _runOnce(task, request, dragExport: dragExport);
+    _tryingPasswords = true;
+    final dragSession = dragExport ? _dragSessions[_activeDragId] : null;
+    final attempted = <String>{request.password};
+    List<String>? candidates;
+    var password = request.password;
+    String? keychainError;
+    try {
+      while (mounted &&
+          _activeQueuedTask?.cancelRequested != true &&
+          dragSession?.cancelled != true) {
+        try {
+          return await _runOnce(
+            task,
+            request.withPassword(password),
+            dragExport: dragExport,
+          );
+        } on ArchiveFailure catch (error) {
+          if (!error.passwordRequired) rethrow;
+          if (candidates == null) {
+            try {
+              candidates =
+                  await _desktop.invokeListMethod<String>(
+                    'archivePasswordCandidates',
+                  ) ??
+                  [];
+            } catch (_) {
+              candidates = [];
+              keychainError = '钥匙串暂时不可用，请手动输入密码';
+            }
+          }
+          if (!mounted ||
+              _activeQueuedTask?.cancelRequested == true ||
+              dragSession?.cancelled == true) {
+            return null;
+          }
+          final remaining = candidates.where(
+            (value) => value.isNotEmpty && !attempted.contains(value),
+          );
+          if (remaining.isNotEmpty) {
+            password = remaining.first;
+            attempted.add(password);
+            continue;
+          }
+          String? value;
+          if (dragExport || _activeQueuedTask?.fromFinder == true) {
+            setState(() => _choosing = true);
+            try {
+              value = await _desktop.invokeMethod<String>('finderPassword', {
+                'path': request.archive,
+                'error': keychainError ?? error.message,
+              });
+            } finally {
+              if (mounted) setState(() => _choosing = false);
+            }
+          } else {
+            value = await _askPassword(
+              error: keychainError ?? error.message,
+              allowAutomatic: false,
+            );
+          }
+          if (value == null || !mounted) {
+            _activeQueuedTask?.cancelRequested = true;
+            if (dragSession != null) dragSession.cancelled = true;
+            if (mounted) setState(() => _status = '操作已取消');
+            return null;
+          }
+          password = value;
+          attempted.add(password);
+        }
+      }
+      return null;
+    } finally {
+      _tryingPasswords = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<Map<String, dynamic>?> _runOnce(
+    String task,
+    ArchiveRequest request, {
+    bool dragExport = false,
+  }) async {
     if (!_engineAvailable ||
         (_exportingDrag && !dragExport) ||
         _activeQueuedTask?.cancelRequested == true) {
@@ -609,6 +701,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     });
     try {
       final result = await _engine!.run(request);
+      _operationPasswords.remove(request.archive);
+      _operationPasswords[request.archive] = request.password;
+      if (_operationPasswords.length > 32) {
+        _operationPasswords.remove(_operationPasswords.keys.first);
+      }
       if (mounted) {
         setState(() {
           _status = '$task完成';
@@ -687,7 +784,8 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   Future<Map<String, dynamic>> _writeArchivePromise(
     Map<dynamic, dynamic> arguments,
   ) {
-    if (_activeQueuedTask != null) {
+    if (_activeQueuedTask != null ||
+        (_tryingPasswords && _activeDragId == null)) {
       throw PlatformException(code: 'busy', message: '请等待当前队列任务完成后重新拖出');
     }
     final session = _dragSessions[arguments['session']];
@@ -727,7 +825,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       }
       _activeDragId = session.id;
       while (mounted && !session.cancelled) {
-        if (item.encrypted && session.password.isEmpty) {
+        if (item.encrypted &&
+            session.password.isEmpty &&
+            !_preferences.autoTryPasswords) {
           final password = await _desktop.invokeMethod<String>(
             'finderPassword',
             {'path': session.archive},
@@ -761,6 +861,8 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               _status = '拖出完成 · ${item.name}';
             });
           }
+          session.password =
+              _operationPasswords[session.archive] ?? session.password;
           return {'ok': true};
         } on ArchiveFailure catch (error) {
           if (!error.passwordRequired) rethrow;
@@ -814,7 +916,13 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     if (paths.isNotEmpty) await _open(paths.first);
   }
 
-  Future<String?> _askPassword({String? error}) async {
+  Future<String?> _askPassword({
+    String? error,
+    bool allowAutomatic = true,
+  }) async {
+    if (allowAutomatic && error == null && _preferences.autoTryPasswords) {
+      return '';
+    }
     final controller = TextEditingController();
     final result = await showDialog<String>(
       context: context,
@@ -914,7 +1022,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         _archive = path;
         _archiveCodePage = resolvedCodePage;
         _volumeCount = result['volumes'] as int? ?? 1;
-        _password = password;
+        _password = _operationPasswords[_archive] ?? password;
         _archiveVersion = result['version'] as String;
         _archiveComment = result['comment'] as String? ?? '';
         _editable = !nested && result['editable'] == true;
@@ -1009,7 +1117,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       );
       if (result != null && mounted) {
         setState(() {
-          _password = password;
+          _password = _operationPasswords[_archive] ?? password;
           _lastOutput = result['path'] as String;
           _status = '解压完成 · $_lastOutput';
         });
@@ -1149,7 +1257,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       );
       if (result != null && mounted) {
         setState(() {
-          _password = password;
+          _password = _operationPasswords[_archive] ?? password;
           _status = '测试通过，压缩包中的文件完整';
         });
         ScaffoldMessenger.of(context)
@@ -1387,7 +1495,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           setState(() {
             _archiveVersion = result['version'] as String;
             _archiveComment = result['comment'] as String? ?? '';
-            _password = password;
+            _password = _operationPasswords[_archive] ?? password;
             _entries = (result['items'] as List)
                 .map(
                   (value) =>
@@ -1772,7 +1880,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       if (!mounted) return;
       final parent = ArchiveParent(
         archive: archive,
-        password: password,
+        password: _operationPasswords[archive] ?? password,
         codePage: _archiveCodePage,
         folder: _folder,
         query: _query,
@@ -1950,7 +2058,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         setState(() {
           _status = '正在预览 · ${entry.normalizedPath}';
           if (_archive == archive && _archiveVersion == version) {
-            _password = password;
+            _password = _operationPasswords[_archive] ?? password;
           }
         });
       }
@@ -2033,6 +2141,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         if (result['version'] != version) {
           throw const ArchiveFailure('压缩包已变化，请重新打开后再操作');
         }
+        password = _operationPasswords[archive] ?? password;
         file = File(p.join(destination, entry.path));
         if (!await file.exists()) {
           file = File(p.join(destination, entry.normalizedPath));
@@ -2050,7 +2159,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
             password: password,
           );
         }
-        if (_archive == archive) _password = password;
+        if (_archive == archive) {
+          _password = _operationPasswords[_archive] ?? password;
+        }
       }
       await _desktop.invokeMethod<void>('launchFile', {
         'path': file.path,
@@ -2084,9 +2195,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       ),
     );
     if (result == null) throw const ArchiveFailure('回写已取消，编辑文件已保留');
+    session.password = _operationPasswords[session.archive] ?? session.password;
     if (mounted) {
       setState(() {
         if (_archive == session.archive) {
+          _password = session.password;
           _archiveVersion = result['version'] as String;
           _archiveComment = result['comment'] as String? ?? '';
           _entries = (result['items'] as List)

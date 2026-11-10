@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'app_theme.dart';
 import 'filename_encoding.dart';
 import 'compression_preset.dart';
+import 'password_manager.dart';
 
 const _desktop = MethodChannel('sevenzip/desktop');
 
@@ -14,6 +15,7 @@ class AppSettings {
     this.showDotEntries = true,
     this.removeRedundantRoot = false,
     this.smartExtraction = false,
+    this.autoTryPasswords = false,
     this.viewer = '',
     this.editor = '',
     this.themeMode = ThemeMode.system,
@@ -48,6 +50,7 @@ class AppSettings {
       showDotEntries: json['showDotEntries'] as bool? ?? true,
       removeRedundantRoot: json['removeRedundantRoot'] as bool? ?? false,
       smartExtraction: json['smartExtraction'] as bool? ?? false,
+      autoTryPasswords: json['autoTryPasswords'] == true,
       viewer: json['viewer'] as String? ?? '',
       editor: json['editor'] as String? ?? '',
       themeMode: ThemeMode.values.firstWhere(
@@ -77,6 +80,7 @@ class AppSettings {
     showDotEntries: showDotEntries,
     removeRedundantRoot: removeRedundantRoot,
     smartExtraction: smartExtraction,
+    autoTryPasswords: autoTryPasswords,
     viewer: viewer,
     editor: editor,
     themeMode: themeMode,
@@ -91,6 +95,7 @@ class AppSettings {
   final bool showDotEntries;
   final bool removeRedundantRoot;
   final bool smartExtraction;
+  final bool autoTryPasswords;
   final String viewer;
   final String editor;
   final ThemeMode themeMode;
@@ -107,6 +112,7 @@ class AppSettings {
     'showDotEntries': showDotEntries,
     'removeRedundantRoot': removeRedundantRoot,
     'smartExtraction': smartExtraction,
+    'autoTryPasswords': autoTryPasswords,
     'viewer': viewer,
     'editor': editor,
     'themeMode': themeMode.name,
@@ -132,6 +138,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late bool _singleClickOpen = widget.initial.singleClickOpen;
   late bool _showDotEntries = widget.initial.showDotEntries;
   late bool _smartExtraction = widget.initial.smartExtraction;
+  late bool _autoTryPasswords = widget.initial.autoTryPasswords;
   late bool _removeRedundantRoot = widget.initial.removeRedundantRoot;
   late final _viewer = TextEditingController(text: widget.initial.viewer);
   late final _editor = TextEditingController(text: widget.initial.editor);
@@ -215,6 +222,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       showDotEntries: _showDotEntries,
       removeRedundantRoot: _removeRedundantRoot,
       smartExtraction: _smartExtraction,
+      autoTryPasswords: _autoTryPasswords,
       viewer: _viewer.text.trim(),
       editor: _editor.text.trim(),
     );
@@ -246,7 +254,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       data: buildAppTheme(brightness, colorTheme: _colorTheme),
       child: Builder(
         builder: (context) => DefaultTabController(
-          length: 4,
+          length: 5,
           child: AlertDialog(
             titlePadding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
             contentPadding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
@@ -262,6 +270,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                       Tab(height: 36, text: '压缩'),
                       Tab(height: 36, text: '文件关联'),
                       Tab(height: 36, text: '外部程序'),
+                      Tab(height: 36, text: '密码'),
                     ],
                   ),
                   const SizedBox(height: 8),
@@ -542,6 +551,26 @@ class _SettingsDialogState extends State<SettingsDialog> {
                                     .onSurfaceVariant,
                               ),
                             ),
+                          ],
+                        ),
+                        Column(
+                          children: [
+                            SwitchListTile(
+                              key: const ValueKey('autoTryPasswords'),
+                              contentPadding: EdgeInsets.zero,
+                              dense: true,
+                              title: const Text('自动尝试钥匙串中的常用密码'),
+                              subtitle: const Text(
+                                '开启后在操作加密归档时按顺序尝试，随后可手动输入密码。',
+                              ),
+                              value: _autoTryPasswords,
+                              onChanged: _saving
+                                  ? null
+                                  : (value) => setState(
+                                      () => _autoTryPasswords = value,
+                                    ),
+                            ),
+                            const Expanded(child: PasswordManager()),
                           ],
                         ),
                       ],

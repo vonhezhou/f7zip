@@ -188,6 +188,25 @@ class ArchiveRequest {
     this.indices = const [],
   });
 
+  ArchiveRequest withPassword(String value) => ArchiveRequest(
+    operation,
+    archive,
+    destination: destination,
+    removeRedundantRoot: removeRedundantRoot,
+    itemPath: itemPath,
+    expectedVersion: expectedVersion,
+    password: value,
+    codePage: codePage,
+    volumeSize: volumeSize,
+    extractionPolicy: extractionPolicy,
+    expectedDestinationVersion: expectedDestinationVersion,
+    format: format,
+    level: level,
+    outputLimit: outputLimit,
+    inputs: inputs,
+    indices: indices,
+  );
+
   final String operation;
   final String archive;
   final String destination;

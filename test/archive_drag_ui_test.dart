@@ -19,6 +19,7 @@ void main() {
     'conflict',
     'encrypted',
     'queueBusy',
+    'saved',
   ]) {
     testWidgets('文件名拖放经原生承诺消息处理 $scenario', (tester) async {
       tester.view.physicalSize = const Size(1120, 800);
@@ -37,17 +38,25 @@ void main() {
             'compress',
             archive,
             inputs: [source.path],
-            password: scenario == 'encrypted' ? 'secret' : '',
+            password: ['encrypted', 'saved'].contains(scenario) ? 'secret' : '',
           ),
         ),
       );
       final output = Directory(p.join(root.path, 'output'))..createSync();
       Map<dynamic, dynamic>? drag;
       var passwords = 0;
+      var savedAttempts = 0;
       final queueChoice = Completer<String?>();
       final messenger =
           TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
       messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'loadSettings' && scenario == 'saved') {
+          return {'autoTryPasswords': true};
+        }
+        if (call.method == 'archivePasswordCandidates') {
+          savedAttempts++;
+          return ['wrong', 'secret'];
+        }
         if (call.method == 'takeFinderRequests') {
           return [
             {
@@ -75,7 +84,7 @@ void main() {
         await tester.tap(find.byKey(const ValueKey('row:source')));
         await tester.pumpAndSettle();
       }
-      if (scenario == 'multiple') {
+      if (['multiple', 'saved'].contains(scenario)) {
         for (final name in ['one.txt', 'two.txt']) {
           await tester.tap(
             find.descendant(
@@ -98,7 +107,7 @@ void main() {
       expect(drag, isNotNull);
       expect(output.listSync(), isEmpty);
       final items = (drag!['items'] as List).cast<Map>();
-      expect(items.length, scenario == 'multiple' ? 2 : 1);
+      expect(items.length, ['multiple', 'saved'].contains(scenario) ? 2 : 1);
       await _native('archiveDragEnded', {
         'session': drag!['session'],
         'cancelled': scenario == 'cancel',
@@ -209,6 +218,10 @@ void main() {
           }
         }
         if (scenario == 'encrypted') expect(passwords, 2);
+        if (scenario == 'saved') {
+          expect(passwords, 0);
+          expect(savedAttempts, 1);
+        }
       }
       expect(
         output.listSync().where(

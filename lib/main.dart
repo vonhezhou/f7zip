@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import 'archive_engine.dart';
+import 'archive_drag.dart';
 import 'archive_tree.dart';
 import 'app_settings.dart';
 import 'edit_workspace.dart';
@@ -103,9 +104,16 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   final _search = TextEditingController();
   final _fileList = ScrollController();
   Timer? _timer;
+  final Map<String, _ArchiveDragSession> _dragSessions = {};
+  Future<void> _dragExports = Future.value();
+  Completer<void>? _activeOperation;
+  String? _activeDragId;
+  int _pendingDragWrites = 0;
+  bool _exportingDrag = false;
 
-  bool get _available =>
+  bool get _engineAvailable =>
       _desktopReady && !_busy && !_choosing && _engine != null;
+  bool get _available => _engineAvailable && !_exportingDrag;
 
   bool get _interactive => _available && !_openingFile && !_mutating;
 
@@ -118,6 +126,12 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       _engineError = '$error';
     }
     _desktop.setMethodCallHandler((call) async {
+      if (call.method == 'writeArchivePromise') {
+        return _writeArchivePromise(call.arguments as Map);
+      }
+      if (call.method == 'archiveDragEnded') {
+        _endArchiveDrag(call.arguments as Map);
+      }
       if (call.method == 'showSettings') await _showSettings();
       if (call.method == 'archiveCommand') {
         await _command(call.arguments as String);
@@ -186,6 +200,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     _finderTimer?.cancel();
     _edits?.close();
     _engine?.cancel();
+    for (final session in _dragSessions.values) {
+      session.cancelled = true;
+      session.expiry?.cancel();
+    }
+    _dragSessions.clear();
     _search.dispose();
     _fileList.dispose();
     _desktop.setMethodCallHandler(null);
@@ -345,9 +364,12 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
 
   Future<Map<String, dynamic>?> _run(
     String task,
-    ArchiveRequest request,
-  ) async {
-    if (!_available) return null;
+    ArchiveRequest request, {
+    bool dragExport = false,
+  }) async {
+    if (!_engineAvailable || (_exportingDrag && !dragExport)) return null;
+    final operation = Completer<void>();
+    _activeOperation = operation;
     setState(() {
       _busy = true;
       _cancelling = false;
@@ -377,6 +399,163 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     } finally {
       _timer?.cancel();
       if (mounted) setState(() => _busy = false);
+      _activeOperation = null;
+      operation.complete();
+    }
+  }
+
+  Future<void> _startArchiveDrag(_VisibleEntry row) async {
+    if (!_interactive || row.dotEntry || _archive == null) return;
+    final selection = _selected.contains(row.path) ? _selected : {row.path};
+    final items = buildArchiveDragItems(_entries, selection);
+    if (items.isEmpty) return;
+    final id = '${DateTime.now().microsecondsSinceEpoch}';
+    final session = _ArchiveDragSession(
+      id: id,
+      archive: _archive!,
+      version: _archiveVersion,
+      password: _password,
+      codePage: _archiveCodePage,
+      items: items,
+    );
+    _dragSessions[id] = session;
+    try {
+      await _desktop.invokeMethod<void>('startArchiveDrag', {
+        'session': id,
+        'items': items.map((item) => item.toJson()).toList(),
+      });
+    } catch (error) {
+      _dragSessions.remove(id);
+      session.expiry?.cancel();
+      if (mounted) await _error(error);
+    }
+  }
+
+  void _endArchiveDrag(Map<dynamic, dynamic> arguments) {
+    final session = _dragSessions[arguments['session']];
+    if (session == null) return;
+    session.ended = true;
+    if (arguments['cancelled'] == true) {
+      session.cancelled = true;
+      if (_activeDragId == session.id) _engine?.cancel();
+    }
+    _releaseArchiveDrag(session);
+  }
+
+  void _releaseArchiveDrag(_ArchiveDragSession session) {
+    if (!session.ended || session.claimed.isNotEmpty) return;
+    session.expiry?.cancel();
+    if (session.cancelled || session.remaining.isEmpty) {
+      _dragSessions.remove(session.id);
+    } else {
+      session.expiry = Timer(const Duration(minutes: 5), () {
+        if (session.claimed.isEmpty) _dragSessions.remove(session.id);
+      });
+    }
+  }
+
+  Future<Map<String, dynamic>> _writeArchivePromise(
+    Map<dynamic, dynamic> arguments,
+  ) {
+    final session = _dragSessions[arguments['session']];
+    final itemId = arguments['item'];
+    final destination = arguments['destination'];
+    final item = session?.items[itemId];
+    if (session == null ||
+        item == null ||
+        destination is! String ||
+        !p.isAbsolute(destination) ||
+        session.cancelled ||
+        !session.remaining.contains(itemId) ||
+        !session.claimed.add(itemId as String)) {
+      throw PlatformException(code: 'drag', message: '拖出请求已失效，请重新拖动');
+    }
+    _pendingDragWrites++;
+    setState(() => _exportingDrag = true);
+    final next = _dragExports.then(
+      (_) => _exportArchivePromise(session, item, destination),
+    );
+    _dragExports = next.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stack) {},
+    );
+    return next;
+  }
+
+  Future<Map<String, dynamic>> _exportArchivePromise(
+    _ArchiveDragSession session,
+    ArchiveDragItem item,
+    String destination,
+  ) async {
+    try {
+      await _activeOperation?.future;
+      if (!mounted || session.cancelled) {
+        throw const ArchiveFailure('拖出已取消', cancelled: true);
+      }
+      _activeDragId = session.id;
+      while (mounted && !session.cancelled) {
+        if (item.encrypted && session.password.isEmpty) {
+          final password = await _desktop.invokeMethod<String>(
+            'finderPassword',
+            {'path': session.archive},
+          );
+          if (password == null) {
+            throw const ArchiveFailure('拖出已取消', cancelled: true);
+          }
+          session.password = password;
+        }
+        try {
+          final result = await _run(
+            '拖出解压',
+            ArchiveRequest(
+              'export',
+              session.archive,
+              destination: destination,
+              itemPath: item.path,
+              expectedVersion: session.version,
+              password: session.password,
+              codePage: session.codePage,
+              indices: item.indices,
+            ),
+            dragExport: true,
+          );
+          if (result == null) {
+            throw const ArchiveFailure('拖出已取消', cancelled: true);
+          }
+          if (mounted) {
+            setState(() {
+              _lastOutput = result['path'] as String;
+              _status = '拖出完成 · ${item.name}';
+            });
+          }
+          return {'ok': true};
+        } on ArchiveFailure catch (error) {
+          if (!error.passwordRequired) rethrow;
+          final password = await _desktop.invokeMethod<String>(
+            'finderPassword',
+            {'path': session.archive, 'error': '密码错误，请重新输入。'},
+          );
+          if (password == null) {
+            throw const ArchiveFailure('拖出已取消', cancelled: true);
+          }
+          session.password = password;
+        }
+      }
+      throw const ArchiveFailure('拖出已取消', cancelled: true);
+    } catch (error) {
+      if (error is ArchiveFailure && error.cancelled) session.cancelled = true;
+      if (mounted) setState(() => _status = '拖出未完成 · $error');
+      throw PlatformException(
+        code: session.cancelled ? 'cancelled' : 'drag',
+        message: '$error',
+      );
+    } finally {
+      _activeDragId = null;
+      session.claimed.remove(item.id);
+      session.remaining.remove(item.id);
+      _pendingDragWrites--;
+      if (mounted) setState(() => _exportingDrag = _pendingDragWrites > 0);
+      _releaseArchiveDrag(session);
     }
   }
 
@@ -2722,16 +2901,24 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
                                   ),
                                   const SizedBox(width: 11),
                                   Expanded(
-                                    child: Text(
-                                      _query.isEmpty
-                                          ? p.posix.basename(row.path)
-                                          : row.path,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: selected
-                                            ? AppColors.of(context).onSelection
-                                            : AppColors.of(context).text,
+                                    child: GestureDetector(
+                                      key: ValueKey('drag:${row.path}'),
+                                      behavior: HitTestBehavior.opaque,
+                                      onPanStart: !_interactive || row.dotEntry
+                                          ? null
+                                          : (_) => _startArchiveDrag(row),
+                                      child: Text(
+                                        _query.isEmpty
+                                            ? p.posix.basename(row.path)
+                                            : row.path,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color: selected
+                                              ? AppColors.of(context)
+                                                    .onSelection
+                                              : AppColors.of(context).text,
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -3023,6 +3210,29 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       ),
     );
   }
+}
+
+class _ArchiveDragSession {
+  _ArchiveDragSession({
+    required this.id,
+    required this.archive,
+    required this.version,
+    required this.password,
+    required this.codePage,
+    required List<ArchiveDragItem> items,
+  }) : items = {for (final item in items) item.id: item},
+       remaining = items.map((item) => item.id).toSet();
+  final String id;
+  final String archive;
+  final String version;
+  String password;
+  final int codePage;
+  final Map<String, ArchiveDragItem> items;
+  final Set<String> remaining;
+  final Set<String> claimed = {};
+  bool cancelled = false;
+  bool ended = false;
+  Timer? expiry;
 }
 
 class _VisibleEntry {

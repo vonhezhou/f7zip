@@ -6,6 +6,17 @@ import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 import 'package:path/path.dart' as p;
 
+typedef _ExportOptionsNative = Void Function(
+  Pointer<Void>,
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+);
+typedef _ExportOptions = void Function(
+  Pointer<Void>,
+  Pointer<Utf8>,
+  Pointer<Utf8>,
+);
+
 typedef _ExtractionOptionsNative = Void Function(
   Pointer<Void>,
   Uint32,
@@ -321,6 +332,11 @@ Map<String, dynamic> _execute(
       request.extractionPolicy.index,
       utf8(request.expectedDestinationVersion),
     );
+    if (request.operation == 'export') {
+      library.lookupFunction<_ExportOptionsNative, _ExportOptions>(
+        'f7_job_export_options',
+      )(job, utf8(request.itemPath), utf8(request.expectedVersion));
+    }
     final engine = utf8(p.join(directory, '7z.so'));
     Pointer<Utf8> response;
     if (request.operation == 'update') {

@@ -43,6 +43,8 @@ struct Job {
     uint64_t volumeSize = 0;
     uint32_t extractionPolicy = 0;
     std::string expectedDestinationVersion;
+    std::string exportPath;
+    std::string exportVersion;
     std::atomic<uint64_t> total{0};
     std::atomic<uint64_t> completed{0};
     std::atomic<bool> cancelled{false};
@@ -164,6 +166,23 @@ static void validateMaterializedLinks(const localfs::path& root) {
 }
 
 static localfs::path validateLinkTarget(const std::string& name, const std::map<std::string, std::string>& links);
+
+static void normalizeExportLinks(const localfs::path& root) {
+    std::map<std::string, std::string> links;
+    for (const auto& entry : localfs::recursive_directory_iterator(root)) {
+        if (localfs::is_symlink(entry.symlink_status())) links[entry.path().lexically_relative(root).generic_string()] = localfs::read_symlink(entry.path()).generic_string();
+    }
+    for (const auto& [name, target] : links) {
+        try { validateLinkTarget(name, links); }
+        catch (const std::runtime_error&) {
+            validateMaterializedLink(root / name, root);
+            const auto relative = localfs::canonical(root / name).lexically_relative(localfs::canonical((root / name).parent_path()));
+            if (unlink((root / name).c_str()) != 0 || symlink(relative.c_str(), (root / name).c_str()) != 0) {
+                throw std::runtime_error("无法调整拖出目录中的相对链接");
+            }
+        }
+    }
+}
 
 // 仅去掉一个独占的顶层目录，内部目录结构保持完整，空目录也可直接发布。
 static localfs::path extractionRoot(const localfs::path& staging, bool removeRedundantRoot) {
@@ -935,7 +954,10 @@ static std::vector<localfs::path> preparePublishedLinks(const localfs::path& sou
     return published;
 }
 
-static localfs::path publishExtraction(const localfs::path& source, const localfs::path& target, Job* job, StagingDirectory& staging, const localfs::path& archive, const struct stat& targetIdentity, ExtractionPermissions& permissions, const localfs::path& outputRelative = {}) {
+static localfs::path publishExtraction(
+    const localfs::path& source, const localfs::path& target, Job* job, StagingDirectory& staging,
+    const localfs::path& archive, const struct stat& targetIdentity, ExtractionPermissions& permissions,
+    const std::string& archiveVolumes, const localfs::path& outputRelative = {}) {
     ExtractionDirectory stagedRoot(source);
     auto directory = std::make_shared<ExtractionDirectory>(target);
     if (directory->identity.st_dev != targetIdentity.st_dev || directory->identity.st_ino != targetIdentity.st_ino) {
@@ -969,6 +991,7 @@ static localfs::path publishExtraction(const localfs::path& source, const localf
     }
     std::sort(moves.begin(), moves.end(), [](const auto& left, const auto& right) { return left.source < right.source; });
     try {
+        if (volumeVersion(archive.c_str()) != archiveVolumes) throw std::runtime_error("发布期间压缩包或分卷已变化，请重新打开");
         for (auto& move : moves) {
             checkCancellation(job);
             move.directory->verify();
@@ -1004,6 +1027,8 @@ static localfs::path publishExtraction(const localfs::path& source, const localf
         for (const auto& move : moves) move.directory->verify();
         for (const auto& link : publishedLinks) validateMaterializedLink(target / link, target);
         permissions.apply();
+        checkCancellation(job);
+        if (volumeVersion(archive.c_str()) != archiveVolumes) throw std::runtime_error("发布期间压缩包或分卷已变化，请重新打开");
     } catch (...) {
         permissions.rollback();
         bool restored = true;
@@ -1224,6 +1249,11 @@ __attribute__((visibility("default"))) void f7_job_extraction_options(Job* job, 
     job->expectedDestinationVersion = expectedVersion;
 }
 
+__attribute__((visibility("default"))) void f7_job_export_options(Job* job, const char* path, const char* version) {
+    job->exportPath = path;
+    job->exportVersion = version;
+}
+
 __attribute__((visibility("default"))) void f7_free(char* value) { free(value); }
 
 __attribute__((visibility("default"))) char* f7_job_progress(Job* job) {
@@ -1233,7 +1263,7 @@ __attribute__((visibility("default"))) char* f7_job_progress(Job* job) {
         ",\"file\":" + quote(job->currentFile) + "}");
 }
 
-// operation 为 list / extract / extractHere / extractSmart / test / compress，解压操作可加 Flat 后缀，所有字符串使用 UTF-8。
+// operation 为 list / extract / extractHere / extractSmart / export / test / compress，解压操作可加 Flat 后缀，所有字符串使用 UTF-8。
 __attribute__((visibility("default"))) char* f7_run(
     Job* job, const char* engine, const char* operation, const char* archive,
     const char* destination, const char* password, const char* format, int level,
@@ -1337,6 +1367,10 @@ __attribute__((visibility("default"))) char* f7_run(
         }
         const auto initialVersion = archiveVersion(archive);
         const auto initialVolumes = volumeVersion(archive);
+        if (op == "export" && (job->exportVersion.empty() ||
+            (job->exportVersion != initialVersion && job->exportVersion != initialVolumes))) {
+            throw std::runtime_error("拖出期间压缩包已变化，请重新打开后再操作");
+        }
         ZipEncodingScope encoding(engine, archive, job->codePage);
         // 展开封装层后，浏览、选中解压与测试共用同一内层归档和索引。
         std::vector<std::unique_ptr<StagingDirectory>> intermediates;
@@ -1386,7 +1420,19 @@ __attribute__((visibility("default"))) char* f7_run(
             return result("{\"ok\":true}");
         }
         const bool smart = op == "extractSmart" || op == "extractSmartFlat";
-        if (op != "extract" && op != "extractHere" && op != "extractFlat" && op != "extractHereFlat" && !smart) throw std::runtime_error("未知操作");
+        const bool exporting = op == "export";
+        if (exporting) {
+            if (job->exportVersion.empty() || job->exportVersion != readVersion) throw std::runtime_error("拖出期间压缩包已变化，请重新打开后再操作");
+            job->exportPath = logicalPath(job->exportPath);
+            if (indexCount <= 0) throw std::runtime_error("拖出请求缺少选中项目");
+            const auto items = reader.items();
+            for (int index = 0; index < indexCount; ++index) {
+                if (indices[index] >= items.size() || !selectedPath(logicalPath(items[indices[index]].path(), true), {job->exportPath})) {
+                    throw std::runtime_error("拖出请求包含目标之外的项目");
+                }
+            }
+        }
+        if (op != "extract" && op != "extractHere" && op != "extractFlat" && op != "extractHereFlat" && !smart && !exporting) throw std::runtime_error("未知操作");
         if (job->extractionPolicy > 4) throw std::runtime_error("无效的解压同名处理方式");
         localfs::path target = localfs::absolute(destination);
         bool intoExisting = op == "extractHere" || op == "extractHereFlat";
@@ -1407,7 +1453,14 @@ __attribute__((visibility("default"))) char* f7_run(
         extractSafely(reader, staging.path, indices, indexCount, job, permissions);
         checkCancellation(job);
         if (volumeVersion(archive) != initialVolumes) throw std::runtime_error("解压期间压缩包或分卷已变化，请重新打开");
-        const auto root = extractionRoot(staging.path, op == "extractFlat" || op == "extractHereFlat" || op == "extractSmartFlat");
+        const auto root = exporting ? staging.path / job->exportPath :
+            extractionRoot(staging.path, op == "extractFlat" || op == "extractHereFlat" || op == "extractSmartFlat");
+        if (exporting) {
+            const auto type = localfs::symlink_status(root);
+            if (localfs::is_symlink(type)) throw std::runtime_error("拖出符号链接时请选择包含其目标的目录");
+            if (!localfs::is_directory(type) && !localfs::is_regular_file(type)) throw std::runtime_error("拖出项目未完整解压");
+            if (localfs::is_directory(type)) normalizeExportLinks(root);
+        }
         localfs::path outputRelative;
         if (smart) {
             auto entry = localfs::directory_iterator(root);
@@ -1425,12 +1478,14 @@ __attribute__((visibility("default"))) char* f7_run(
         }
         auto resultPath = target;
         if (intoExisting) {
-            const auto published = publishExtraction(root, target, job, staging, archive, targetIdentity, permissions, outputRelative);
+            const auto published = publishExtraction(root, target, job, staging, archive, targetIdentity, permissions, initialVolumes, outputRelative);
             if (!published.empty()) resultPath /= published;
         }
         else {
-            validateMaterializedLinks(root);
+            if (localfs::is_directory(localfs::symlink_status(root))) validateMaterializedLinks(root);
             permissions.apply();
+            checkCancellation(job);
+            if (volumeVersion(archive) != initialVolumes) throw std::runtime_error("发布期间压缩包或分卷已变化，请重新打开");
             publish(root, target);
             // 整个暂存目录已成为用户结果，清理职责随发布转移。
             if (root == staging.path) staging.preserve = true;

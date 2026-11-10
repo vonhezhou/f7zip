@@ -5,6 +5,9 @@ import UniformTypeIdentifiers
 class MainFlutterWindow: NSWindow {
   private var channel: FlutterMethodChannel?
   private var archiveMenu: ArchiveMenuTarget?
+  private var dragSources: [String: ArchiveFileDragSource] = [:]
+  private var dragEventMonitor: Any?
+  private var lastDragEvent: NSEvent?
 
   override func awakeFromNib() {
     (NSApp.delegate as? AppDelegate)?.archiveWindow = self
@@ -21,6 +24,8 @@ class MainFlutterWindow: NSWindow {
     channel = bridge
     bridge.setMethodCallHandler { call, result in
       switch call.method {
+      case "startArchiveDrag":
+        self.startArchiveDrag(call.arguments as? [String: Any] ?? [:], view: controller.view, result: result)
       case "finderPassword":
         let arguments = call.arguments as? [String: String] ?? [:]
         let alert = NSAlert()
@@ -152,6 +157,10 @@ class MainFlutterWindow: NSWindow {
     }
     (NSApp.delegate as? AppDelegate)?.archiveChannel = bridge
     controller.engine.run(withEntrypoint: nil)
+    dragEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged]) { [weak self] event in
+      if event.window === self { self?.lastDragEvent = event }
+      return event
+    }
     super.awakeFromNib()
     DispatchQueue.main.async {
       let menu = ArchiveMenuTarget(channel: bridge)
@@ -169,6 +178,48 @@ class MainFlutterWindow: NSWindow {
   }
 
   private let associationExtensions = ["zip", "7z", "rar", "tar", "gz", "xz", "bz2", "iso", "tgz", "tbz", "tbz2", "txz", "001", "z01", "r00", "zst", "cab", "dmg", "wim", "jar", "apk"]
+
+  deinit {
+    if let monitor = dragEventMonitor { NSEvent.removeMonitor(monitor) }
+  }
+
+  private func startArchiveDrag(_ arguments: [String: Any], view: NSView, result: @escaping FlutterResult) {
+    guard let sessionId = arguments["session"] as? String,
+          let items = arguments["items"] as? [[String: Any]], !items.isEmpty,
+          let channel = channel, let event = lastDragEvent,
+          event.type == .leftMouseDragged || event.type == .leftMouseDown,
+          NSEvent.pressedMouseButtons & 1 != 0 else {
+      result(FlutterError(code: "drag", message: "请按住鼠标从文件名开始拖动", details: nil))
+      return
+    }
+    var identifiers = Set<String>()
+    for item in items {
+      guard let identifier = item["id"] as? String, identifiers.insert(identifier).inserted,
+            let name = item["name"] as? String, !name.isEmpty, name != ".", name != "..",
+            !name.contains("/"), !name.contains("\0"), item["directory"] is Bool else {
+        result(FlutterError(code: "drag", message: "拖出项目名称无效", details: nil))
+        return
+      }
+    }
+    let source = ArchiveFileDragSource(sessionId: sessionId, channel: channel, count: items.count)
+    source.onFinished = { [weak self] in self?.dragSources.removeValue(forKey: sessionId) }
+    dragSources[sessionId] = source
+    let point = view.convert(event.locationInWindow, from: nil)
+    let draggingItems = items.enumerated().map { index, item -> NSDraggingItem in
+      let type = item["directory"] as? Bool == true ? UTType.folder.identifier : UTType.data.identifier
+      let provider = NSFilePromiseProvider(fileType: type, delegate: source)
+      provider.userInfo = item
+      let dragging = NSDraggingItem(pasteboardWriter: provider)
+      let icon = NSWorkspace.shared.icon(for: item["directory"] as? Bool == true ? UTType.folder : UTType.data)
+      let offset = CGFloat(min(index, 4)) * 4
+      dragging.setDraggingFrame(NSRect(x: point.x - 16 + offset, y: point.y - 16 - offset, width: 32, height: 32), contents: icon)
+      return dragging
+    }
+    let session = view.beginDraggingSession(with: draggingItems, event: event, source: source)
+    session.draggingFormation = .stack
+    session.animatesToStartingPositionsOnCancelOrFail = true
+    result(nil)
+  }
 
   private func associationStates() -> [[String: Any]] {
     let backups = UserDefaults.standard.dictionary(forKey: "associationBackups") as? [String: String] ?? [:]
@@ -317,5 +368,80 @@ private class ArchiveMenuTarget: NSObject, NSMenuItemValidation {
     if command == "tree" { menuItem.state = state["treeVisible"] == true ? .on : .off }
     if menuItem.action == #selector(openRecent(_:)) { return state["open"] ?? false }
     return state[command] ?? false
+  }
+}
+
+// Finder 确定落点后再请求数据，拖动取消时无需创建解压临时文件。
+private class ArchiveFileDragSource: NSObject, NSDraggingSource, NSFilePromiseProviderDelegate {
+  let sessionId: String
+  let channel: FlutterMethodChannel
+  let count: Int
+  var onFinished: (() -> Void)?
+  private var pending = 0
+  private var completed = Set<String>()
+  private var ended = false
+  private var cancelled = false
+  private var expiry: Timer?
+
+  init(sessionId: String, channel: FlutterMethodChannel, count: Int) {
+    self.sessionId = sessionId
+    self.channel = channel
+    self.count = count
+  }
+
+  deinit { expiry?.invalidate() }
+
+  func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+    return context == .outsideApplication ? .copy : []
+  }
+
+  func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+    ended = true
+    cancelled = operation.isEmpty
+    channel.invokeMethod("archiveDragEnded", arguments: ["session": sessionId, "cancelled": cancelled])
+    finishIfReady()
+    if !cancelled && completed.count < count { scheduleExpiry() }
+  }
+
+  func filePromiseProvider(_ filePromiseProvider: NSFilePromiseProvider, fileNameForType fileType: String) -> String {
+    return (filePromiseProvider.userInfo as? [String: Any])?["name"] as? String ?? "Extracted"
+  }
+
+  func filePromiseProvider(_ filePromiseProvider: NSFilePromiseProvider, writePromiseTo url: URL, completionHandler: @escaping (Error?) -> Void) {
+    DispatchQueue.main.async {
+      guard let item = (filePromiseProvider.userInfo as? [String: Any])?["id"] as? String else {
+        completionHandler(NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError, userInfo: [NSLocalizedDescriptionKey: "拖出请求无效"]))
+        return
+      }
+      self.pending += 1
+      self.channel.invokeMethod("writeArchivePromise", arguments: ["session": self.sessionId, "item": item, "destination": url.path]) { value in
+        var error: Error?
+        if let failure = value as? FlutterError {
+          error = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError, userInfo: [NSLocalizedDescriptionKey: failure.message ?? "拖出解压失败"])
+        } else if (value as? [String: Any])?["ok"] as? Bool != true {
+          error = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError, userInfo: [NSLocalizedDescriptionKey: "拖出请求已失效"])
+        }
+        completionHandler(error)
+        self.pending -= 1
+        self.completed.insert(item)
+        self.finishIfReady()
+      }
+    }
+  }
+
+  private func finishIfReady() {
+    if ended && pending == 0 && (cancelled || completed.count == count) {
+      expiry?.invalidate()
+      onFinished?()
+    }
+  }
+
+  private func scheduleExpiry() {
+    expiry?.invalidate()
+    expiry = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
+      guard let self = self else { return }
+      if self.pending > 0 { self.scheduleExpiry() }
+      else { self.onFinished?() }
+    }
   }
 }

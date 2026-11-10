@@ -46,6 +46,9 @@
 				<string>bz2</string>
 				<string>iso</string>
 				<string>tgz</string>
+				<string>tbz</string>
+				<string>tbz2</string>
+				<string>txz</string>
 				<string>zst</string>
 				<string>cab</string>
 				<string>dmg</string>

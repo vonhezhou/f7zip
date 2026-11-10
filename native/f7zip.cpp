@@ -8,10 +8,12 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -380,9 +382,29 @@ __attribute__((visibility("default"))) char* f7_run(
             if (inputCount <= 0) throw std::runtime_error("请选择需要压缩的文件或文件夹");
             localfs::path target = localfs::absolute(archive);
             if (localfs::exists(target)) throw std::runtime_error("目标文件已存在，请使用新文件名");
+            const std::map<std::string, const BitInOutFormat*> formats = {
+                {"zip", &BitFormat::Zip}, {"zip-aes256", &BitFormat::Zip},
+                {"7z", &BitFormat::SevenZip}, {"7z-visible", &BitFormat::SevenZip},
+                {"tar", &BitFormat::Tar}, {"gz", &BitFormat::GZip},
+                {"xz", &BitFormat::Xz}, {"bz2", &BitFormat::BZip2},
+                {"tar.gz", &BitFormat::GZip}, {"tar.bz2", &BitFormat::BZip2},
+                {"tar.xz", &BitFormat::Xz}
+            };
+            const auto found = formats.find(format);
+            if (found == formats.end()) throw std::runtime_error("不支持的压缩格式");
+            const auto& outputFormat = *found->second;
+            const bool tarStream = std::string(format).rfind("tar.", 0) == 0;
+            const bool singleFile = !tarStream && !outputFormat.hasFeature(FormatFeatures::MultipleFiles);
+            if (singleFile && inputCount != 1) throw std::runtime_error("所选格式仅支持压缩一个普通文件");
+            if (password[0] && !outputFormat.hasFeature(FormatFeatures::Encryption)) {
+                throw std::runtime_error("所选格式不支持密码加密");
+            }
             std::vector<std::string> paths;
             for (int i = 0; i < inputCount; ++i) {
                 localfs::path source = localfs::canonical(inputs[i]);
+                if (singleFile && !localfs::is_regular_file(source)) {
+                    throw std::runtime_error("所选格式仅支持压缩一个普通文件");
+                }
                 if (localfs::is_directory(source)) {
                     auto relative = localfs::weakly_canonical(target).lexically_relative(source);
                     if (!relative.empty() && *relative.begin() != "..") {
@@ -392,21 +414,54 @@ __attribute__((visibility("default"))) char* f7_run(
                 paths.push_back(source.string());
             }
             StagingDirectory staging(target.parent_path());
-            const bool sevenZip = std::string(format) == "7z" || std::string(format) == "7z-visible";
-            BitFileCompressor compressor(library, sevenZip ? BitFormat::SevenZip : BitFormat::Zip);
+            const bool sevenZip = outputFormat == BitFormat::SevenZip;
+            BitFileCompressor compressor(library, outputFormat);
             callbacks(compressor, job);
             compressor.setCompressionLevel(static_cast<BitCompressionLevel>(level));
             if (password[0]) compressor.setPassword(password, sevenZip && std::string(format) != "7z-visible");
             if (std::string(format) == "zip-aes256") compressor.setFormatProperty(L"em", L"AES256");
-            const auto output = staging.path / (sevenZip ? "archive.7z" : "archive.zip");
+            const auto output = staging.path / (std::string("archive.") + (tarStream ? "tar." : "") + outputFormat.extension());
+            if (tarStream) {
+                const auto tar = staging.path / "archive.tar";
+                BitFileCompressor packer(library, BitFormat::Tar);
+                callbacks(packer, job);
+                packer.compress(paths, tar.string());
+                checkCancellation(job);
+                paths = {tar.string()};
+            }
             compressor.compress(paths, output.string());
             checkCancellation(job);
             publish(output, target);
             return result("{\"ok\":true,\"path\":" + quote(target.string()) + "}");
         }
         const auto initialVersion = archiveVersion(archive);
-        BitArchiveReader reader(library, archive, BitFormat::Auto, password);
-        callbacks(reader, job);
+        // 复合归档的索引始终指向内层 TAR，浏览、选中解压与完整性测试共用同一入口。
+        std::unique_ptr<StagingDirectory> intermediate;
+        auto opened = std::make_unique<BitArchiveReader>(library, archive, BitFormat::Auto, password);
+        callbacks(*opened, job);
+        std::string archiveName = localfs::path(archive).filename().string();
+        std::transform(archiveName.begin(), archiveName.end(), archiveName.begin(),
+            [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        const std::vector<std::string> tarSuffixes = {".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz"};
+        const bool namedTar = std::any_of(tarSuffixes.begin(), tarSuffixes.end(), [&](const auto& suffix) {
+            return archiveName.size() >= suffix.size() && archiveName.compare(archiveName.size() - suffix.size(), suffix.size(), suffix) == 0;
+        });
+        const auto& outerFormat = opened->detectedFormat();
+        if (namedTar && (outerFormat == BitFormat::GZip || outerFormat == BitFormat::BZip2 || outerFormat == BitFormat::Xz)) {
+            for (const auto& item : opened->items()) validateEntry(item);
+            intermediate = std::make_unique<StagingDirectory>(localfs::temp_directory_path());
+            opened->extractTo(intermediate->path.string());
+            checkCancellation(job);
+            auto contents = localfs::directory_iterator(intermediate->path);
+            if (contents == localfs::directory_iterator()) throw std::runtime_error("复合归档缺少内层 TAR");
+            const auto tar = contents->path();
+            if (!localfs::is_regular_file(localfs::symlink_status(tar)) || ++contents != localfs::directory_iterator()) {
+                throw std::runtime_error("复合归档的内层 TAR 无效");
+            }
+            opened = std::make_unique<BitArchiveReader>(library, tar.string(), BitFormat::Tar, password);
+            callbacks(*opened, job);
+        }
+        auto& reader = *opened;
         if (op == "list") {
             auto items = archiveItems(reader, job);
             if (archiveVersion(archive) != initialVersion) throw std::runtime_error("读取期间压缩包已变化，请重新打开");

@@ -1,4 +1,9 @@
 """通过实际 C ABI 验证压缩结果、失败恢复和解压边界。"""
+import bz2
+import gzip
+import io
+import lzma
+import tarfile
 import ctypes
 import fcntl
 import json
@@ -538,6 +543,130 @@ class NativeEngineTest(unittest.TestCase):
         with zipfile.ZipFile(archive) as reader:
             self.assertEqual(reader.comment, b'archive comment')
         self.assertEqual(response['comment'], 'archive comment')
+
+    def test_new_creation_formats_readable_by_independent_decoders(self):
+        source = self.source / '你好.txt'
+        for format, read in [('gz', gzip.decompress), ('xz', lzma.decompress), ('bz2', bz2.decompress)]:
+            with self.subTest(format=format):
+                archive = self.root / ('payload.' + format)
+                response = execute('compress', archive, format=format, inputs=[source])
+                self.assertTrue(response['ok'], response)
+                self.assertEqual(read(archive.read_bytes()), source.read_bytes())
+                self.assertTrue(execute('test', archive)['ok'])
+                listing = execute('list', archive)
+                self.assertTrue(listing['ok'], listing)
+                self.assertFalse(listing['editable'])
+                output = self.root / ('output-' + format)
+                self.assertTrue(execute('extract', archive, output)['ok'])
+                self.assertEqual(next(output.iterdir()).read_bytes(), source.read_bytes())
+        archive = self.root / 'payload.tar'
+        response = execute('compress', archive, format='tar', inputs=[self.source])
+        self.assertTrue(response['ok'], response)
+        with tarfile.open(archive) as reader:
+            self.assertEqual(reader.extractfile('中文目录/你好.txt').read(), source.read_bytes())
+            self.assertTrue(reader.getmember('中文目录/empty').isdir())
+        self.assert_no_staging()
+
+    def test_compound_creation_listing_selected_extraction_and_test(self):
+        for format in ['tar.gz', 'tar.bz2', 'tar.xz']:
+            with self.subTest(format=format):
+                archive = self.root / ('compound.' + format)
+                response = execute('compress', archive, format=format, inputs=[self.source])
+                self.assertTrue(response['ok'], response)
+                with tarfile.open(archive) as reader:
+                    self.assertEqual(reader.extractfile('中文目录/你好.txt').read(), (self.source / '你好.txt').read_bytes())
+                listing = execute('list', archive)
+                self.assertTrue(listing['ok'], listing)
+                self.assertFalse(listing['editable'])
+                item = next(item for item in listing['items'] if item['path'] == '中文目录/你好.txt')
+                self.assertTrue(execute('test', archive)['ok'])
+                target = self.root / ('selected-' + format)
+                self.assertTrue(execute('extract', archive, target, indices=[item['index']])['ok'])
+                self.assertEqual((target / item['path']).read_bytes(), (self.source / '你好.txt').read_bytes())
+                self.assertEqual(len(list(target.rglob('*.txt'))), 1)
+                flat = self.root / ('flat-' + format)
+                self.assertTrue(execute('extractFlat', archive, flat)['ok'])
+                self.assertTrue((flat / 'empty').is_dir())
+                self.assertTrue((flat / '你好.txt').is_file())
+        self.assert_no_staging()
+
+    def test_compound_aliases_from_independent_writer(self):
+        for extension, mode in [('tgz', 'w:gz'), ('tbz', 'w:bz2'), ('tbz2', 'w:bz2'), ('txz', 'w:xz')]:
+            with self.subTest(extension=extension):
+                archive = self.root / ('external.' + extension)
+                with tarfile.open(archive, mode) as writer:
+                    writer.add(self.source, arcname='资料')
+                listing = execute('list', archive)
+                self.assertTrue(listing['ok'], listing)
+                self.assertTrue(any(item['path'] == '资料/你好.txt' for item in listing['items']))
+                target = self.root / ('external-' + extension)
+                target.mkdir()
+                self.assertTrue(execute('extractHereFlat', archive, target)['ok'])
+                self.assertEqual((target / '你好.txt').read_bytes(), (self.source / '你好.txt').read_bytes())
+        self.assert_no_staging()
+
+    def test_compound_failure_cancellation_and_existing_target_protection(self):
+        archive = self.root / 'protected.tar.gz'
+        self.assertTrue(execute('compress', archive, format='tar.gz', inputs=[self.source])['ok'])
+        existing = self.root / 'existing'
+        existing.mkdir()
+        marker = existing / 'keep.txt'
+        marker.write_bytes(b'keep')
+        self.assertFalse(execute('extract', archive, existing)['ok'])
+        self.assertEqual(marker.read_bytes(), b'keep')
+        with tarfile.open(archive, 'r:gz') as reader:
+            self.assertIsNotNone(reader.getmember('中文目录/你好.txt'))
+        job = LIB.f7_job_create()
+        try:
+            LIB.f7_job_cancel(job)
+            response = execute('extract', archive, self.root / 'cancelled-compound', job=job)
+            self.assertFalse(response['ok'])
+            self.assertTrue(response['cancelled'])
+            self.assertFalse((self.root / 'cancelled-compound').exists())
+        finally:
+            LIB.f7_job_destroy(job)
+        damaged = self.root / 'damaged.tar.gz'
+        damaged.write_bytes(archive.read_bytes()[:30])
+        self.assertFalse(execute('extract', damaged, self.root / 'damaged-output')['ok'])
+        self.assertFalse((self.root / 'damaged-output').exists())
+        self.assert_no_staging()
+
+    def test_compound_archives_reject_unsafe_inner_paths_and_links(self):
+        for mode, extension in [('w:gz', 'tgz'), ('w:bz2', 'tbz2'), ('w:xz', 'txz')]:
+            for link in [False, True]:
+                with self.subTest(mode=mode, link=link):
+                    archive = self.root / ('unsafe.' + extension)
+                    with tarfile.open(archive, mode) as writer:
+                        item = tarfile.TarInfo('link' if link else '../escape.txt')
+                        if link:
+                            item.type = tarfile.SYMTYPE
+                            item.linkname = '../escape.txt'
+                            writer.addfile(item)
+                        else:
+                            item.size = 4
+                            writer.addfile(item, io.BytesIO(b'evil'))
+                    target = self.root / 'unsafe-result'
+                    response = execute('extract', archive, target)
+                    self.assertFalse(response['ok'], response)
+                    self.assertFalse(target.exists())
+                    self.assertFalse((self.root / 'escape.txt').exists())
+                    self.assert_no_staging()
+
+    def test_stream_formats_reject_multiple_files_directories_and_passwords(self):
+        source = self.source / '你好.txt'
+        for format in ['gz', 'xz', 'bz2']:
+            for inputs, password in [([self.source], ''), ([source, source], ''), ([source], 'secret')]:
+                with self.subTest(format=format, inputs=inputs, password=password):
+                    archive = self.root / ('invalid.' + format)
+                    response = execute('compress', archive, format=format, inputs=inputs, password=password)
+                    self.assertFalse(response['ok'], response)
+                    self.assertFalse(archive.exists())
+                    self.assert_no_staging()
+        for format in ['tar', 'unknown']:
+            archive = self.root / ('invalid.' + format)
+            self.assertFalse(execute('compress', archive, format=format, inputs=[source], password='secret')['ok'])
+            self.assertFalse(archive.exists())
+        self.assert_no_staging()
 
     def test_empty_input_rejected(self):
         response = execute('compress', self.root / 'empty.zip')

@@ -643,6 +643,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           '.bz2',
           '.iso',
           '.tgz',
+          '.tbz',
+          '.tbz2',
+          '.txz',
           '.zst',
           '.001',
           '.cab',
@@ -2837,7 +2840,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         content: const SizedBox(
           width: 400,
           child: SelectableText(
-            '开源 macOS 压缩工具\n\nFlutter 界面 · 7-Zip 26.06 原生引擎\nbit7z 4.0.10 C++ 封装\n\nF7Zip 使用 MIT 许可证。\n7-Zip 遵循 LGPL、BSD 及 unRAR 限制。\nbit7z 遵循 MPL-2.0。\n\n支持 ZIP / 7z 创建与编辑回写，多格式浏览与解压。',
+            '开源 macOS 压缩工具\n\nFlutter 界面 · 7-Zip 26.06 原生引擎\nbit7z 4.0.10 C++ 封装\n\nF7Zip 使用 MIT 许可证。\n7-Zip 遵循 LGPL、BSD 及 unRAR 限制。\nbit7z 遵循 MPL-2.0。\n\n支持 ZIP / 7z / TAR / GZIP / XZ / BZIP2 创建，ZIP / 7z 编辑回写，多格式浏览与解压。',
           ),
         ),
         actions: [
@@ -2898,6 +2901,11 @@ class _CompressionDialogState extends State<_CompressionDialog> {
   bool _encryptNames = true;
   final _password = TextEditingController();
   bool _showPassword = false;
+  bool get _supportsPassword => _format == 'zip' || _format == '7z';
+  bool get _singleFileFormat => const {'gz', 'xz', 'bz2'}.contains(_format);
+  bool get _validInput =>
+      !_singleFileFormat ||
+      (widget.inputs.length == 1 && File(widget.inputs.single).existsSync());
   @override
   void dispose() {
     _password.dispose();
@@ -2943,6 +2951,8 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                 Expanded(
                   child: DropdownButtonFormField<String>(
                     initialValue: _format,
+                    key: const ValueKey('compressionFormat'),
+                    isExpanded: true,
                     decoration: const InputDecoration(labelText: '压缩格式'),
                     items: const [
                       DropdownMenuItem(
@@ -2950,6 +2960,19 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                         child: Text('ZIP · 兼容性优先'),
                       ),
                       DropdownMenuItem(value: '7z', child: Text('7z · 压缩率优先')),
+                      DropdownMenuItem(value: 'tar', child: Text('TAR · 仅打包')),
+                      DropdownMenuItem(value: 'tar.gz', child: Text('TAR.GZ')),
+                      DropdownMenuItem(
+                        value: 'tar.bz2',
+                        child: Text('TAR.BZ2'),
+                      ),
+                      DropdownMenuItem(value: 'tar.xz', child: Text('TAR.XZ')),
+                      DropdownMenuItem(value: 'gz', child: Text('GZIP · 单文件')),
+                      DropdownMenuItem(value: 'xz', child: Text('XZ · 单文件')),
+                      DropdownMenuItem(
+                        value: 'bz2',
+                        child: Text('BZIP2 · 单文件'),
+                      ),
                     ],
                     onChanged: (value) => setState(() => _format = value!),
                   ),
@@ -2966,30 +2989,33 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                       DropdownMenuItem(value: 7, child: Text('最大')),
                       DropdownMenuItem(value: 9, child: Text('极限')),
                     ],
-                    onChanged: (value) => setState(() => _level = value!),
+                    onChanged: _format == 'tar'
+                        ? null
+                        : (value) => setState(() => _level = value!),
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 12),
-            TextField(
-              controller: _password,
-              obscureText: !_showPassword,
-              decoration: InputDecoration(
-                labelText: '密码（可选）',
-                hintText: '留空则不加密',
-                suffixIcon: IconButton(
-                  onPressed: () =>
-                      setState(() => _showPassword = !_showPassword),
-                  icon: Icon(
-                    _showPassword
-                        ? Icons.visibility_off_outlined
-                        : Icons.visibility_outlined,
-                    size: 18,
+            if (_supportsPassword)
+              TextField(
+                controller: _password,
+                obscureText: !_showPassword,
+                decoration: InputDecoration(
+                  labelText: '密码（可选）',
+                  hintText: '留空则不加密',
+                  suffixIcon: IconButton(
+                    onPressed: () =>
+                        setState(() => _showPassword = !_showPassword),
+                    icon: Icon(
+                      _showPassword
+                          ? Icons.visibility_off_outlined
+                          : Icons.visibility_outlined,
+                      size: 18,
+                    ),
                   ),
                 ),
               ),
-            ),
             const SizedBox(height: 12),
             if (_format == 'zip')
               DropdownButtonFormField<String>(
@@ -3014,12 +3040,22 @@ class _CompressionDialogState extends State<_CompressionDialog> {
               ),
             const SizedBox(height: 12),
             Text(
-              _format == '7z'
-                  ? '7z 使用 AES-256。填写密码后启用加密。'
-                  : '填写密码后启用所选加密算法。ZIP 密码请使用 ASCII 字符。',
+              !_validInput
+                  ? '此格式需要选择一个普通文件。多个文件或文件夹可选择 ZIP、7z 或 TAR。'
+                  : switch (_format) {
+                      '7z' => '7z 使用 AES-256。填写密码后启用加密。',
+                      'zip' => '填写密码后启用所选加密算法。ZIP 密码请使用 ASCII 字符。',
+                      'tar' => 'TAR 保留目录结构，仅打包，不进行压缩。',
+                      'tar.gz' ||
+                      'tar.bz2' ||
+                      'tar.xz' => '先打包为 TAR，再压缩，保留目录结构。',
+                      _ => '压缩单个文件，保留文件内容。',
+                    },
               style: TextStyle(
                 fontSize: 11,
-                color: AppColors.of(context).secondary,
+                color: _validInput
+                    ? AppColors.of(context).secondary
+                    : Theme.of(context).colorScheme.error,
               ),
             ),
           ],
@@ -3032,16 +3068,18 @@ class _CompressionDialogState extends State<_CompressionDialog> {
         child: const Text('取消'),
       ),
       FilledButton(
-        onPressed: () => Navigator.pop(
-          context,
-          _CompressionOptions(
-            _format,
-            _level,
-            _password.text,
-            encryption: _encryption,
-            encryptNames: _encryptNames,
-          ),
-        ),
+        onPressed: !_validInput
+            ? null
+            : () => Navigator.pop(
+                context,
+                _CompressionOptions(
+                  _format,
+                  _level,
+                  _supportsPassword ? _password.text : '',
+                  encryption: _encryption,
+                  encryptNames: _encryptNames,
+                ),
+              ),
         child: const Text('选择保存位置'),
       ),
     ],
@@ -3062,6 +3100,9 @@ String _archiveStem(String path) {
     '.xz',
     '.bz2',
     '.tgz',
+    '.tbz',
+    '.tbz2',
+    '.txz',
     '.iso',
     '.zst',
   ]) {

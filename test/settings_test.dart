@@ -1,5 +1,6 @@
 import 'package:f7zip/app_settings.dart';
 import 'package:f7zip/app_theme.dart';
+import 'package:f7zip/filename_encoding.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,6 +17,11 @@ void main() {
     final defaults = AppSettings.fromJson({});
     expect(defaults.singleClickOpen, isTrue);
     expect(defaults.removeRedundantRoot, isFalse);
+    expect(defaults.filenameEncoding, FilenameEncoding.autoDetect);
+    expect(
+      AppSettings.fromJson({'filenameEncoding': 'invalid'}).filenameEncoding,
+      FilenameEncoding.autoDetect,
+    );
     expect(defaults.themeMode, ThemeMode.system);
     expect(defaults.colorTheme, AppColorTheme.purple);
     expect(
@@ -28,6 +34,7 @@ void main() {
     );
     final settings = const AppSettings(
       themeMode: ThemeMode.dark,
+      filenameEncoding: FilenameEncoding.shiftJis,
       colorTheme: AppColorTheme.teal,
       alternateRows: false,
       singleClickOpen: false,
@@ -110,6 +117,10 @@ void main() {
     );
     await tester.tap(find.text('打开设置'));
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('filenameEncoding')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('日文 Shift-JIS').last);
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('colorTheme:green')));
     await tester.pumpAndSettle();
     expect(
@@ -124,12 +135,15 @@ void main() {
       buildAppTheme(Brightness.light).colorScheme,
     );
     await tester.ensureVisible(find.text('单击打开文件和文件夹'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('单击打开文件和文件夹'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('显示返回上一级目录项（..）'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('显示返回上一级目录项（..）'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('解压时删除冗余的根目录'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('解压时删除冗余的根目录'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('文件关联'));
@@ -149,6 +163,7 @@ void main() {
     await tester.tap(find.text('保存设置'));
     await tester.pumpAndSettle();
     expect(saved!.colorTheme, AppColorTheme.green);
+    expect(saved!.filenameEncoding, FilenameEncoding.shiftJis);
     expect(saved!.singleClickOpen, isFalse);
     expect(saved!.showDotEntries, isFalse);
     expect(saved!.removeRedundantRoot, isTrue);

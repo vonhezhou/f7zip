@@ -4,6 +4,7 @@ import gzip
 import io
 import lzma
 import tarfile
+import struct
 import ctypes
 import fcntl
 import json
@@ -20,6 +21,7 @@ LIB = ctypes.CDLL(str(ROOT / 'native/lib/libf7zip.dylib'))
 LIB.f7_job_create.restype = ctypes.c_void_p
 LIB.f7_job_destroy.argtypes = [ctypes.c_void_p]
 LIB.f7_job_cancel.argtypes = [ctypes.c_void_p]
+LIB.f7_job_codepage.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 LIB.f7_free.argtypes = [ctypes.c_void_p]
 LIB.f7_run.restype = ctypes.c_void_p
 LIB.f7_run.argtypes = [ctypes.c_void_p, *([ctypes.c_char_p] * 6), ctypes.c_int,
@@ -27,9 +29,10 @@ LIB.f7_run.argtypes = [ctypes.c_void_p, *([ctypes.c_char_p] * 6), ctypes.c_int,
                       ctypes.POINTER(ctypes.c_uint32), ctypes.c_int]
 
 
-def execute(operation, archive, destination='', password='', format='zip', inputs=(), indices=(), job=None):
+def execute(operation, archive, destination='', password='', format='zip', inputs=(), indices=(), job=None, code_page=0):
     owned = job is None
     job = LIB.f7_job_create() if owned else job
+    LIB.f7_job_codepage(job, code_page)
     strings = [str(value).encode() for value in [ROOT / 'native/lib/7z.so', operation,
                archive, destination, password, format]]
     files = (ctypes.c_char_p * len(inputs))(*(str(value).encode() for value in inputs))
@@ -43,9 +46,10 @@ def execute(operation, archive, destination='', password='', format='zip', input
             LIB.f7_job_destroy(job)
 
 
-def update(archive, item, edited, version, password='', job=None):
+def update(archive, item, edited, version, password='', job=None, code_page=0):
     owned = job is None
     job = LIB.f7_job_create() if owned else job
+    LIB.f7_job_codepage(job, code_page)
     LIB.f7_update.restype = ctypes.c_void_p
     LIB.f7_update.argtypes = [ctypes.c_void_p, *([ctypes.c_char_p] * 6)]
     strings = [str(value).encode() for value in [ROOT / 'native/lib/7z.so', archive,
@@ -59,9 +63,10 @@ def update(archive, item, edited, version, password='', job=None):
             LIB.f7_job_destroy(job)
 
 
-def mutate(archive, action, version, item='', destination='', inputs=(), password='', job=None):
+def mutate(archive, action, version, item='', destination='', inputs=(), password='', job=None, code_page=0):
     owned = job is None
     job = LIB.f7_job_create() if owned else job
+    LIB.f7_job_codepage(job, code_page)
     LIB.f7_mutate.restype = ctypes.c_void_p
     LIB.f7_mutate.argtypes = [ctypes.c_void_p, *([ctypes.c_char_p] * 7), ctypes.POINTER(ctypes.c_char_p), ctypes.c_int]
     strings = [str(value).encode() for value in [ROOT / 'native/lib/7z.so', archive, action, item, destination, password, version]]
@@ -667,6 +672,97 @@ class NativeEngineTest(unittest.TestCase):
             self.assertFalse(execute('compress', archive, format=format, inputs=[source], password='secret')['ok'])
             self.assertFalse(archive.exists())
         self.assert_no_staging()
+
+    def legacy_zip(self, name, encoding, names):
+        class LegacyInfo(zipfile.ZipInfo):
+            def _encodeFilenameFlags(self):
+                return self.filename.encode(encoding), self.flag_bits & ~0x800
+        archive = self.root / name
+        with zipfile.ZipFile(archive, 'w') as writer:
+            for path in names:
+                writer.writestr(LegacyInfo(path), ('content:' + path).encode())
+            writer.writestr('UTF8-中文.txt', b'utf8-marked')
+        return archive
+
+    def test_legacy_zip_auto_detection_manual_selection_and_extraction(self):
+        cases = [
+            ('gb18030', 54936, ['中文目录/测试文档你好世界.txt', '中文目录/另一份文件.txt']),
+            ('cp932', 932, ['日本語フォルダ/資料ファイルこんにちは.txt', '日本語フォルダ/報告書.txt']),
+            ('big5', 950, ['繁體中文/資料測試檔案.txt']),
+            ('cp1252', 1252, ['résumé/café.txt']),
+            ('utf8', 65001, ['Unicode中文/文件.txt']),
+            ('cp949', 949, ['한글폴더/테스트문서안녕하세요.txt', '한글폴더/자료보고서.txt']),
+        ]
+        for encoding, code_page, names in cases:
+            with self.subTest(encoding=encoding):
+                archive = self.legacy_zip('legacy-' + encoding + '.zip', encoding, names)
+                for requested in [0, code_page]:
+                    listing = execute('list', archive, code_page=requested)
+                    self.assertTrue(listing['ok'], listing)
+                    self.assertEqual(listing['codePage'], code_page)
+                    self.assertEqual({item['path'] for item in listing['items']}, set(names + ['UTF8-中文.txt']))
+                    target = self.root / f'output-{encoding}-{requested}'
+                    response = execute('extract', archive, target, code_page=requested)
+                    self.assertTrue(response['ok'], response)
+                    for name in names:
+                        self.assertEqual((target / name).read_bytes(), ('content:' + name).encode())
+                    self.assertEqual((target / 'UTF8-中文.txt').read_bytes(), b'utf8-marked')
+        self.assert_no_staging()
+
+    def test_legacy_zip_edits_keep_decoded_names_and_untouched_content(self):
+        names = ['中文目录/测试文档你好世界.txt', '中文目录/另一份文件.txt']
+        archive = self.legacy_zip('legacy-edit.zip', 'gb18030', names)
+        listing = execute('list', archive, code_page=54936)
+        edited = self.root / 'edited.txt'
+        edited.write_bytes(b'updated externally')
+        response = update(archive, names[0], edited, listing['version'], code_page=54936)
+        self.assertTrue(response['ok'], response)
+        self.assertEqual({item['path'] for item in response['items']}, set(names + ['UTF8-中文.txt']))
+        target = self.root / 'legacy-edited'
+        self.assertTrue(execute('extract', archive, target, code_page=54936)['ok'])
+        self.assertEqual((target / names[0]).read_bytes(), b'updated externally')
+        self.assertEqual((target / names[1]).read_bytes(), ('content:' + names[1]).encode())
+        response = mutate(archive, 'rename', response['version'], item=names[1], destination='中文目录/重命名.txt', code_page=54936)
+        self.assertTrue(response['ok'], response)
+        self.assertIn('中文目录/重命名.txt', {item['path'] for item in response['items']})
+        self.assertTrue(execute('test', archive, code_page=54936)['ok'])
+        self.assert_no_staging()
+
+    def test_zip_encoding_detects_zip64_and_self_extracting_prefix(self):
+        names = ['中文目录/测试文档你好世界.txt', '中文目录/另一份文件.txt']
+        original = self.legacy_zip('container.zip', 'gb18030', names).read_bytes()
+        end = original.rfind(b'PK\x05\x06')
+        central_size, central_offset = struct.unpack_from('<II', original, end + 12)
+        zip64_end = struct.pack('<IQHHIIQQQQ', 0x06064b50, 44, 45, 45, 0, 0, 3, 3, central_size, central_offset)
+        locator = struct.pack('<IIQI', 0x07064b50, 0, end, 1)
+        end_record = bytearray(original[end:])
+        struct.pack_into('<HHII', end_record, 8, 0xffff, 0xffff, 0xffffffff, 0xffffffff)
+        zip64 = self.root / 'zip64.zip'
+        zip64.write_bytes(original[:end] + zip64_end + locator + end_record)
+        sfx = self.root / 'prefixed.zip'
+        sfx.write_bytes(b'F7Zip prefix for test\n' * 4 + original)
+        for archive in [zip64, sfx]:
+            with self.subTest(archive=archive):
+                listing = execute('list', archive)
+                self.assertTrue(listing['ok'], listing)
+                self.assertEqual(listing['codePage'], 54936)
+                self.assertEqual({item['path'] for item in listing['items']}, set(names + ['UTF8-中文.txt']))
+        self.assertFalse(execute('list', zip64, code_page=99999)['ok'])
+
+    def test_zip_encoding_remains_isolated_between_concurrent_jobs(self):
+        import concurrent.futures
+        chinese = ['中文目录/测试文档你好世界.txt']
+        japanese = ['日本語フォルダ/資料ファイルこんにちは.txt']
+        archives = [self.legacy_zip('chinese.zip', 'gb18030', chinese),
+                    self.legacy_zip('japanese.zip', 'cp932', japanese)]
+        def read(index):
+            expected = chinese if index % 2 == 0 else japanese
+            page = 54936 if index % 2 == 0 else 932
+            result = execute('list', archives[index % 2], code_page=page)
+            self.assertTrue(result['ok'], result)
+            self.assertEqual({item['path'] for item in result['items']}, set(expected + ['UTF8-中文.txt']))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(read, range(20)))
 
     def test_empty_input_rejected(self):
         response = execute('compress', self.root / 'empty.zip')

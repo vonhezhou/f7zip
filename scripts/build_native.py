@@ -15,10 +15,12 @@ VENDOR = ROOT / 'native/vendor'
 ENGINE_VERSION = '26.06'
 SOURCE_ARCHIVE = VENDOR / f'7z{ENGINE_VERSION.replace(".", "")}-src.tar.xz'
 SOURCE_URL = f'https://github.com/ip7z/7zip/releases/download/{ENGINE_VERSION}/{SOURCE_ARCHIVE.name}'
-ENGINE = VENDOR / f'7zip-{ENGINE_VERSION}'
+CODEPAGE_HEADER = ROOT / 'native/7zip_codepage.hpp'
+ENGINE_PATCH = hashlib.sha256(CODEPAGE_HEADER.read_bytes() + Path(__file__).read_bytes()).hexdigest()[:12]
+ENGINE = VENDOR / f'7zip-{ENGINE_VERSION}-{ENGINE_PATCH}'
 BIT7Z = VENDOR / 'bit7z'
 LIB = ROOT / 'native/lib'
-OBJECTS = VENDOR / f'objects-{ENGINE_VERSION}'
+OBJECTS = VENDOR / f'objects-{ENGINE_VERSION}-{ENGINE_PATCH}'
 SOURCE_HASH = 'a4e374c8f864f51df48c2cfd0e1413ec3b2ea030deae852d6a655402ebb61ac4'
 BIT7Z_SOURCE_HASH = '5a79f9cd2f7bc17ae4088a6b7ac9b5b08476082c1404c98c50ae52aa441559ae'
 BIT7Z_COMMIT = '0f03717920442abcdba80183534931c867feb9c0'
@@ -51,6 +53,22 @@ def main():
             unpacked.mkdir()
             with tarfile.open(archive) as source:
                 source.extractall(unpacked)
+            zip_source = unpacked / 'CPP/7zip/Archive/Zip/ZipItem.cpp'
+            content = zip_source.read_bytes()
+            include = b'#include "ZipItem.h"'
+            conversion = b'  MultiByteToUnicodeString2(res, s, useSpecifiedCodePage ? codePage : GetCodePage());'
+            if content.count(include) != 1 or content.count(conversion) != 1:
+                raise RuntimeError('7-Zip ZIP 解码补丁上下文不匹配')
+            content = content.replace(include, include + b'\r\n#include "F7ZipCodePage.h"')
+            content = content.replace(
+                b'  bool isUtf8 = IsUtf8();',
+                b'  if (f7zipCodePage != 0) { codePage = f7zipCodePage; useSpecifiedCodePage = true; }\r\n  bool isUtf8 = IsUtf8();',
+            )
+            content = content.replace(conversion,
+                b'  if (useSpecifiedCodePage && codePage != CP_UTF8) { f7zipDecodeLegacy(res, s, codePage); return; }\r\n' + conversion)
+            zip_source.chmod(zip_source.stat().st_mode | 0o200)
+            zip_source.write_bytes(content)
+            shutil.copy2(CODEPAGE_HEADER, zip_source.parent / 'F7ZipCodePage.h')
             unpacked.rename(ENGINE)
     bundled_bit7z = ROOT / 'third_party/bit7z-source.tar.gz'
     if not BIT7Z.exists():
@@ -71,7 +89,7 @@ def main():
     if not deployment_stamp.exists():
         shutil.rmtree(bundle / '_o', ignore_errors=True)
     build_env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET='12.0')
-    run(['make', '-j8', '-f', 'makefile.gcc', 'CXX=clang++', 'CC=clang'], cwd=bundle, env=build_env)
+    run(['make', '-j8', '-f', 'makefile.gcc', 'CXX=clang++', 'CC=clang', 'LIB2=-lpthread -ldl -liconv'], cwd=bundle, env=build_env)
     deployment_stamp.touch()
     shutil.copy2(bundle / '_o/7z.so', LIB / '7z.so')
     flags = ['-std=c++17', '-O2', '-fPIC', '-mmacosx-version-min=12.0',
@@ -80,7 +98,7 @@ def main():
              '-DEXTERNAL_CODECS', '-DENV_UNIX', '-DBREAK_HANDLER', '-DUSE_WIN_FILE',
              '-I' + str(BIT7Z / 'include'), '-I' + str(BIT7Z / 'include/bit7z'),
              '-I' + str(BIT7Z / 'src'), '-I' + str(ENGINE / 'CPP')]
-    sources = sorted((BIT7Z / 'src').rglob('*.cpp')) + [ROOT / 'native/f7zip.cpp']
+    sources = sorted((BIT7Z / 'src').rglob('*.cpp')) + [ROOT / 'native/f7zip.cpp', ROOT / 'native/zip_encoding.mm']
 
     def compile_source(source):
         name = str(source.relative_to(ROOT / 'native')).replace('/', '_') + '.o'
@@ -92,7 +110,7 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         objects = list(pool.map(compile_source, sources))
     run(['clang++', '-dynamiclib', '-mmacosx-version-min=12.0', *objects,
-         '-o', LIB / 'libf7zip.dylib', '-install_name', '@rpath/libf7zip.dylib'])
+         '-framework', 'Foundation', '-o', LIB / 'libf7zip.dylib', '-install_name', '@rpath/libf7zip.dylib'])
     licenses = LIB / 'licenses'
     licenses.mkdir(exist_ok=True)
     shutil.copy2(ENGINE / 'DOC/License.txt', licenses / '7zip.txt')

@@ -1,3 +1,4 @@
+#include "zip_encoding.hpp"
 #include <bit7z/bit7zlibrary.hpp>
 #include <bit7z/bitarchivereader.hpp>
 #include <bit7z/bitfilecompressor.hpp>
@@ -32,6 +33,7 @@ namespace localfs = std::filesystem;
 using namespace bit7z;
 
 struct Job {
+    uint32_t codePage = 0;
     std::atomic<uint64_t> total{0};
     std::atomic<uint64_t> completed{0};
     std::atomic<bool> cancelled{false};
@@ -360,6 +362,10 @@ extern "C" {
 __attribute__((visibility("default"))) Job* f7_job_create() { return new Job(); }
 __attribute__((visibility("default"))) void f7_job_destroy(Job* job) { delete job; }
 __attribute__((visibility("default"))) void f7_job_cancel(Job* job) { job->cancelled = true; }
+__attribute__((visibility("default"))) void f7_job_codepage(Job* job, uint32_t codePage) {
+    job->codePage = codePage;
+}
+
 __attribute__((visibility("default"))) void f7_free(char* value) { free(value); }
 
 __attribute__((visibility("default"))) char* f7_job_progress(Job* job) {
@@ -435,6 +441,7 @@ __attribute__((visibility("default"))) char* f7_run(
             return result("{\"ok\":true,\"path\":" + quote(target.string()) + "}");
         }
         const auto initialVersion = archiveVersion(archive);
+        ZipEncodingScope encoding(engine, archive, job->codePage);
         // 复合归档的索引始终指向内层 TAR，浏览、选中解压与完整性测试共用同一入口。
         std::unique_ptr<StagingDirectory> intermediate;
         auto opened = std::make_unique<BitArchiveReader>(library, archive, BitFormat::Auto, password);
@@ -466,7 +473,7 @@ __attribute__((visibility("default"))) char* f7_run(
             auto items = archiveItems(reader, job);
             if (archiveVersion(archive) != initialVersion) throw std::runtime_error("读取期间压缩包已变化，请重新打开");
             const bool editable = reader.detectedFormat() == BitFormat::Zip || reader.detectedFormat() == BitFormat::SevenZip;
-            return result("{\"ok\":true,\"version\":" + quote(initialVersion) +
+            return result("{\"ok\":true,\"codePage\":" + std::to_string(encoding.codePage()) + ",\"version\":" + quote(initialVersion) +
                 ",\"editable\":" + (editable ? "true" : "false") + ",\"comment\":" + quote(archiveComment(reader)) + ",\"items\":" + items + "}");
         }
         if (op == "test") {
@@ -520,6 +527,7 @@ static char* mutateArchive(
             throw std::runtime_error("原压缩包已被其他操作修改，已保留编辑文件，请重新核对后合并");
         }
         Bit7zLibrary library(engine);
+        ZipEncodingScope encoding(engine, archive, job->codePage);
         const std::string action(actionValue);
         bool sevenZip = false;
         bool encrypted = false;

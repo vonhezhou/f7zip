@@ -63,6 +63,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   String? _engineError;
   String? _archive;
   String _password = '';
+  int _archiveCodePage = 0;
   String _archiveVersion = '';
   String _archiveComment = '';
   bool _editable = false;
@@ -306,6 +307,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               path,
               destination: parent ?? p.dirname(path),
               removeRedundantRoot: _preferences.removeRedundantRoot,
+              codePage: _preferences.filenameEncoding.codePage,
               password: password,
             ),
           );
@@ -451,16 +453,42 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       return false;
     }
     try {
+      final sessions =
+          _edits?.sessions
+              .where((session) => session.archive == path)
+              .toList() ??
+          [];
+      final requested = _preferences.filenameEncoding.codePage;
+      final requestedCodePage = requested == 0 && sessions.isNotEmpty
+          ? sessions.first.codePage
+          : requested;
       final result = await _run(
         '读取压缩包',
-        ArchiveRequest('list', path, password: password),
+        ArchiveRequest(
+          'list',
+          path,
+          password: password,
+          codePage: requestedCodePage,
+        ),
       );
       if (result == null || !mounted) return false;
+      final codePage = result['codePage'] as int? ?? 0;
+      if (_edits?.sessions.any(
+            (session) =>
+                session.archive == path &&
+                session.codePage != 0 &&
+                session.codePage != codePage,
+          ) ??
+          false) {
+        await _error('此压缩包仍有外部编辑会话，请结束监控后再切换文件名编码');
+        return false;
+      }
       final items = (result['items'] as List)
           .map((item) => ArchiveEntry.fromJson(item as Map<String, dynamic>))
           .toList();
       setState(() {
         _archive = path;
+        _archiveCodePage = codePage;
         _password = password;
         _archiveVersion = result['version'] as String;
         _archiveComment = result['comment'] as String? ?? '';
@@ -540,6 +568,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           archive,
           destination: destination,
           removeRedundantRoot: _preferences.removeRedundantRoot,
+          codePage: _archiveCodePage,
           password: password,
           indices: indices,
         ),
@@ -567,7 +596,12 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     try {
       final result = await _run(
         '完整性测试',
-        ArchiveRequest('test', _archive!, password: password),
+        ArchiveRequest(
+          'test',
+          _archive!,
+          password: password,
+          codePage: _archiveCodePage,
+        ),
       );
       if (result != null && mounted) {
         setState(() {
@@ -778,6 +812,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               destination: destination,
               password: password,
               expectedVersion: version,
+              codePage: _archiveCodePage,
             ),
           );
           if (result == null || !mounted) return false;
@@ -1079,8 +1114,14 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       builder: (_) => SettingsDialog(initial: _preferences),
     );
     if (preferences != null && mounted) {
+      final encodingChanged =
+          _preferences.filenameEncoding != preferences.filenameEncoding;
       setState(() => _preferences = preferences);
       widget.onSettingsChanged?.call(preferences);
+      final archive = _archive;
+      if (encodingChanged && archive != null) {
+        await _open(archive, password: _password);
+      }
     }
   }
 
@@ -1124,6 +1165,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
             destination: destination,
             password: password,
             indices: [entry.index],
+            codePage: _archiveCodePage,
           ),
         );
         if (result == null || !mounted) return;
@@ -1143,6 +1185,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
             file: file,
             version: version,
             requiresPassword: requiresPassword,
+            codePage: _archiveCodePage,
             password: password,
           );
         }
@@ -1175,6 +1218,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         itemPath: session.itemPath,
         expectedVersion: session.version,
         password: session.password,
+        codePage: session.codePage,
         inputs: [snapshot],
       ),
     );

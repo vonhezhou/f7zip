@@ -15,6 +15,7 @@ void main() {
     EditWorkspace workspace,
     String name, {
     String password = '',
+    int codePage = 0,
   }) async {
     final directory = await workspace.root.createTemp('edit-');
     final file = File(p.join(directory.path, name));
@@ -27,6 +28,7 @@ void main() {
       version: 'v1',
       requiresPassword: password.isNotEmpty,
       password: password,
+      codePage: codePage,
     );
   }
 
@@ -68,10 +70,15 @@ void main() {
       update: (session, snapshot) async => 'unused',
     );
     addTearDown(workspace.close);
-    final current = await track(workspace, 'current.txt');
+    final current = await track(workspace, 'current.txt', codePage: 932);
     final stale = await track(workspace, 'stale.txt');
     stale.version = 'external-version';
     await stale.persist();
+    final oldManifest = File(p.join(stale.directory.path, 'session.json'));
+    final oldData =
+        jsonDecode(await oldManifest.readAsString()) as Map<String, dynamic>;
+    oldData.remove('codePage');
+    await oldManifest.writeAsString(jsonEncode(oldData));
     await workspace.rebaseArchive(current.archive, 'v1', 'v2');
     expect(current.version, 'v2');
     expect(stale.version, 'external-version');
@@ -84,6 +91,8 @@ void main() {
     addTearDown(restored.close);
     await restored.restore();
     expect(restored.find(current.archive, current.itemPath)!.version, 'v2');
+    expect(restored.find(current.archive, current.itemPath)!.codePage, 932);
+    expect(restored.find(stale.archive, stale.itemPath)!.codePage, 0);
     expect(
       restored.find(stale.archive, stale.itemPath)!.version,
       'external-version',

@@ -6,6 +6,9 @@ import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 import 'package:path/path.dart' as p;
 
+typedef _CodePageNative = Void Function(Pointer<Void>, Uint32);
+typedef _CodePage = void Function(Pointer<Void>, int);
+
 typedef _CreateNative = Pointer<Void> Function();
 typedef _Create = Pointer<Void> Function();
 typedef _JobNative = Void Function(Pointer<Void>);
@@ -151,6 +154,7 @@ class ArchiveRequest {
     this.itemPath = '',
     this.expectedVersion = '',
     this.password = '',
+    this.codePage = 0,
     this.format = 'zip',
     this.level = 5,
     this.inputs = const [],
@@ -164,6 +168,7 @@ class ArchiveRequest {
   final String itemPath;
   final String expectedVersion;
   final String password;
+  final int codePage;
   final String format;
   final int level;
   final List<String> inputs;
@@ -278,6 +283,10 @@ Map<String, dynamic> _execute(
       indices[i] = request.indices[i];
     }
     final job = Pointer<Void>.fromAddress(address);
+    library.lookupFunction<_CodePageNative, _CodePage>('f7_job_codepage')(
+      job,
+      request.codePage,
+    );
     final engine = utf8(p.join(directory, '7z.so'));
     Pointer<Utf8> response;
     if (request.operation == 'update') {

@@ -15,6 +15,7 @@ class EditSession {
     required this.savedDigest,
     required this.requiresPassword,
     this.password = '',
+    this.codePage = 0,
   });
 
   final Directory directory;
@@ -22,6 +23,7 @@ class EditSession {
   final String itemPath;
   final File file;
   final bool requiresPassword;
+  final int codePage;
   String version;
   String savedDigest;
   String password;
@@ -43,6 +45,7 @@ class EditSession {
         'version': version,
         'savedDigest': savedDigest,
         'requiresPassword': requiresPassword,
+        'codePage': codePage,
       }),
       flush: true,
     );
@@ -95,6 +98,7 @@ class EditWorkspace {
             version: json['version'] as String,
             savedDigest: json['savedDigest'] as String,
             requiresPassword: json['requiresPassword'] as bool? ?? false,
+            codePage: json['codePage'] as int? ?? 0,
           ),
         );
       } catch (error) {
@@ -121,6 +125,7 @@ class EditWorkspace {
     required String version,
     required bool requiresPassword,
     required String password,
+    int codePage = 0,
   }) async {
     final session = EditSession(
       directory: directory,
@@ -130,6 +135,7 @@ class EditWorkspace {
       version: version,
       savedDigest: await digest(file),
       requiresPassword: requiresPassword,
+      codePage: codePage,
       password: password,
     );
     await session.persist();

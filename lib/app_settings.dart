@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'app_theme.dart';
+import 'filename_encoding.dart';
 
 const _desktop = MethodChannel('sevenzip/desktop');
 
@@ -15,6 +16,7 @@ class AppSettings {
     this.editor = '',
     this.themeMode = ThemeMode.system,
     this.colorTheme = AppColorTheme.purple,
+    this.filenameEncoding = FilenameEncoding.autoDetect,
   });
 
   factory AppSettings.fromJson(Map<dynamic, dynamic> json) => AppSettings(
@@ -27,6 +29,10 @@ class AppSettings {
     themeMode: ThemeMode.values.firstWhere(
       (mode) => mode.name == json['themeMode'],
       orElse: () => ThemeMode.system,
+    ),
+    filenameEncoding: FilenameEncoding.values.firstWhere(
+      (encoding) => encoding.name == json['filenameEncoding'],
+      orElse: () => FilenameEncoding.autoDetect,
     ),
     colorTheme: AppColorTheme.values.firstWhere(
       (theme) => theme.name == json['colorTheme'],
@@ -42,6 +48,7 @@ class AppSettings {
   final String editor;
   final ThemeMode themeMode;
   final AppColorTheme colorTheme;
+  final FilenameEncoding filenameEncoding;
 
   Map<String, dynamic> toJson() => {
     'alternateRows': alternateRows,
@@ -52,6 +59,7 @@ class AppSettings {
     'editor': editor,
     'themeMode': themeMode.name,
     'colorTheme': colorTheme.name,
+    'filenameEncoding': filenameEncoding.name,
   };
 }
 
@@ -65,6 +73,7 @@ class SettingsDialog extends StatefulWidget {
 class _SettingsDialogState extends State<SettingsDialog> {
   late ThemeMode _themeMode = widget.initial.themeMode;
   late AppColorTheme _colorTheme = widget.initial.colorTheme;
+  late FilenameEncoding _filenameEncoding = widget.initial.filenameEncoding;
   late bool _alternateRows = widget.initial.alternateRows;
   late bool _singleClickOpen = widget.initial.singleClickOpen;
   late bool _showDotEntries = widget.initial.showDotEntries;
@@ -143,6 +152,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
     final settings = AppSettings(
       themeMode: _themeMode,
       colorTheme: _colorTheme,
+      filenameEncoding: _filenameEncoding,
       alternateRows: _alternateRows,
       singleClickOpen: _singleClickOpen,
       showDotEntries: _showDotEntries,
@@ -225,6 +235,31 @@ class _SettingsDialogState extends State<SettingsDialog> {
                                     setState(() => _themeMode = value);
                                   }
                                 },
+                              ),
+                            ),
+                            ListTile(
+                              title: const Text('ZIP 文件名编码'),
+                              trailing: DropdownButton<FilenameEncoding>(
+                                key: const ValueKey('filenameEncoding'),
+                                value: _filenameEncoding,
+                                style: Theme.of(context).textTheme.bodyMedium,
+                                items: [
+                                  for (final encoding
+                                      in FilenameEncoding.values)
+                                    DropdownMenuItem(
+                                      value: encoding,
+                                      child: Text(encoding.label),
+                                    ),
+                                ],
+                                onChanged: _saving
+                                    ? null
+                                    : (value) {
+                                        if (value != null) {
+                                          setState(
+                                            () => _filenameEncoding = value,
+                                          );
+                                        }
+                                      },
                               ),
                             ),
                             Padding(

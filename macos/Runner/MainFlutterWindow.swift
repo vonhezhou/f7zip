@@ -11,6 +11,7 @@ class MainFlutterWindow: NSWindow {
   private var dragSources: [String: ArchiveFileDragSource] = [:]
   private var dragEventMonitor: Any?
   private var lastDragEvent: NSEvent?
+  private var nestedArchiveDirectories = Set<URL>()
   private var previewDirectories = Set<URL>()
   private var archivePreviews: [String: ArchivePreviewWindowController] = [:]
   private var previewTerminationObserver: NSObjectProtocol?
@@ -30,9 +31,23 @@ class MainFlutterWindow: NSWindow {
     channel = bridge
     previewTerminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
       self?.cleanupArchivePreviews()
+      self?.cleanupNestedArchives()
     }
     bridge.setMethodCallHandler { call, result in
       switch call.method {
+      case "createNestedArchiveDirectory":
+        do {
+          guard self.nestedArchiveDirectories.count < 8 else { throw ArchivePreviewError.resourceLimit }
+          let directory = FileManager.default.temporaryDirectory.appendingPathComponent("f7zip-nested-" + UUID().uuidString, isDirectory: true)
+          try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+          self.nestedArchiveDirectories.insert(directory)
+          result(directory.path)
+        } catch { result(FlutterError(code: "nested", message: error.localizedDescription, details: nil)) }
+      case "discardNestedArchiveDirectory":
+        do {
+          if let path = call.arguments as? String { try self.discardNestedArchiveDirectory(URL(fileURLWithPath: path, isDirectory: true)) }
+          result(nil)
+        } catch { result(FlutterError(code: "nested", message: error.localizedDescription, details: nil)) }
       case "createArchivePreviewDirectory":
         self.createArchivePreviewDirectory(result: result)
       case "discardArchivePreviewDirectory":
@@ -203,6 +218,16 @@ class MainFlutterWindow: NSWindow {
   deinit {
     if let observer = previewTerminationObserver { NotificationCenter.default.removeObserver(observer) }
     if let monitor = dragEventMonitor { NSEvent.removeMonitor(monitor) }
+  }
+
+  private func discardNestedArchiveDirectory(_ directory: URL) throws {
+    guard nestedArchiveDirectories.contains(directory) else { return }
+    if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
+    nestedArchiveDirectories.remove(directory)
+  }
+
+  private func cleanupNestedArchives() {
+    for directory in Array(nestedArchiveDirectories) { try? discardNestedArchiveDirectory(directory) }
   }
 
   private func createArchivePreviewDirectory(result: @escaping FlutterResult) {
@@ -443,6 +468,8 @@ private class ArchiveMenuTarget: NSObject, NSMenuItemValidation {
       view.insertItem(item("前进", "forward", "]"), at: 2)
       view.insertItem(item("内置预览", "preview"), at: 3)
       view.insertItem(item("查看文件", "view"), at: 4)
+      view.insertItem(item("进入子压缩包", "nested"), at: 5)
+      view.insertItem(item("返回父压缩包", "parentArchive"), at: 6)
       view.insertItem(.separator(), at: 4)
     }
     updateRecent(UserDefaults.standard.stringArray(forKey: "recentArchives") ?? [])

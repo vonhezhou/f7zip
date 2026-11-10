@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'archive_engine.dart';
 import 'archive_drag.dart';
 import 'archive_preview.dart';
+import 'nested_archive.dart';
 import 'archive_tree.dart';
 import 'app_settings.dart';
 import 'edit_workspace.dart';
@@ -112,6 +113,8 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   int _pendingDragWrites = 0;
   bool _exportingDrag = false;
   final Map<String, String> _previewDirectories = {};
+  final List<ArchiveParent> _archiveParents = [];
+  final Set<String> _nestedDirectories = {};
 
   bool get _engineAvailable =>
       _desktopReady && !_busy && !_choosing && _engine != null;
@@ -211,6 +214,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       session.expiry?.cancel();
     }
     _dragSessions.clear();
+    unawaited(_clearNestedArchives());
     final previews = Map<String, String>.from(_previewDirectories);
     _previewDirectories.clear();
     unawaited(
@@ -648,19 +652,25 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     return result;
   }
 
-  Future<bool> _open(String path, {String password = ''}) async {
+  Future<bool> _open(
+    String path, {
+    String password = '',
+    bool nested = false,
+    int? codePage,
+  }) async {
     if (!_interactive) return false;
-    if (!await File(path).exists()) {
-      await _error('压缩包不存在或已被移动。\n$path');
-      return false;
-    }
+    _openingFile = true;
     try {
+      if (!await File(path).exists()) {
+        await _error('压缩包不存在或已被移动。\n$path');
+        return false;
+      }
       final sessions =
           _edits?.sessions
               .where((session) => session.archive == path)
               .toList() ??
           [];
-      final requested = _preferences.filenameEncoding.codePage;
+      final requested = codePage ?? _preferences.filenameEncoding.codePage;
       final requestedCodePage = requested == 0 && sessions.isNotEmpty
           ? sessions.first.codePage
           : requested;
@@ -674,12 +684,12 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         ),
       );
       if (result == null || !mounted) return false;
-      final codePage = result['codePage'] as int? ?? 0;
+      final resolvedCodePage = result['codePage'] as int? ?? 0;
       if (_edits?.sessions.any(
             (session) =>
                 session.archive == path &&
                 session.codePage != 0 &&
-                session.codePage != codePage,
+                session.codePage != resolvedCodePage,
           ) ??
           false) {
         await _error('此压缩包仍有外部编辑会话，请结束监控后再切换文件名编码');
@@ -688,14 +698,16 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       final items = (result['items'] as List)
           .map((item) => ArchiveEntry.fromJson(item as Map<String, dynamic>))
           .toList();
+      if (!nested) await _clearNestedArchives();
+      if (!mounted) return false;
       setState(() {
         _archive = path;
-        _archiveCodePage = codePage;
+        _archiveCodePage = resolvedCodePage;
         _volumeCount = result['volumes'] as int? ?? 1;
         _password = password;
         _archiveVersion = result['version'] as String;
         _archiveComment = result['comment'] as String? ?? '';
-        _editable = result['editable'] == true;
+        _editable = !nested && result['editable'] == true;
         _entries = items;
         _tree = buildArchiveTree(items);
         _folder = '';
@@ -706,12 +718,16 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         _query = '';
         _search.clear();
         _selected.clear();
-        _recent.remove(path);
-        _recent.insert(0, path);
-        if (_recent.length > 8) _recent.removeLast();
+        if (!nested) {
+          _recent.remove(path);
+          _recent.insert(0, path);
+          if (_recent.length > 8) _recent.removeLast();
+        }
         _status = '已打开 ${p.basename(path)}';
       });
-      unawaited(_desktop.invokeMethod<void>('rememberArchive', path));
+      if (!nested) {
+        unawaited(_desktop.invokeMethod<void>('rememberArchive', path));
+      }
       unawaited(_desktop.invokeMethod<void>('setArchiveTitle', path));
       return true;
     } catch (error) {
@@ -724,9 +740,18 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       }
       final retry = await _askPassword(error: '$error');
       if (retry != null && retry.isNotEmpty && mounted) {
-        return _open(path, password: retry);
+        _openingFile = false;
+        return await _open(
+          path,
+          password: retry,
+          nested: nested,
+          codePage: codePage,
+        );
       }
       return false;
+    } finally {
+      _openingFile = false;
+      if (mounted) setState(() {});
     }
   }
 
@@ -747,7 +772,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       password = value;
     }
     String parent;
-    if (besideArchive) {
+    if (besideArchive && _archiveParents.isEmpty) {
       parent = p.dirname(archive);
     } else {
       final paths = await _choose('chooseFolder');
@@ -1268,6 +1293,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
 
   void _closeArchive() {
     if (!_interactive) return;
+    unawaited(_clearNestedArchives());
     setState(() {
       _archive = null;
       _entries = [];
@@ -1312,6 +1338,12 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         break;
       case 'test':
         await _test();
+        break;
+      case 'nested':
+        if (_selectedFile != null) await _enterNestedArchive(_selectedFile!);
+        break;
+      case 'parentArchive':
+        await _returnToParentArchive();
         break;
       case 'preview':
         if (_selectedFile != null) await _previewFile(_selectedFile!);
@@ -1430,6 +1462,170 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       }
     }
     return null;
+  }
+
+  Future<void> _discardNestedDirectory(String directory) async {
+    try {
+      await _desktop.invokeMethod<void>(
+        'discardNestedArchiveDirectory',
+        directory,
+      );
+      _nestedDirectories.remove(directory);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _workspaceError = '子包暂存清理失败。$directory\n$error');
+      }
+    }
+  }
+
+  Future<void> _clearNestedArchives() async {
+    _archiveParents.clear();
+    for (final directory in _nestedDirectories.toList()) {
+      await _discardNestedDirectory(directory);
+    }
+  }
+
+  Future<void> _enterNestedArchive(ArchiveEntry entry) async {
+    final archive = _archive;
+    if (!_interactive ||
+        archive == null ||
+        !isNestedArchive(entry.normalizedPath)) {
+      return;
+    }
+    if (_archiveParents.length >= nestedArchiveDepth) {
+      await _error(const ArchiveFailure('最多进入八层子压缩包，请先返回父包'));
+      return;
+    }
+    if (entry.size > nestedArchiveLimit) {
+      await _error(const ArchiveFailure('子压缩包超过 256 MiB 浏览上限，请先解压'));
+      return;
+    }
+    final version = _archiveVersion;
+    var password = _password;
+    String? directory;
+    var retained = false;
+    _openingFile = true;
+    try {
+      if (entry.encrypted && password.isEmpty) {
+        final value = await _askPassword();
+        if (value == null || !mounted) return;
+        password = value;
+      }
+      directory = await _desktop.invokeMethod<String>(
+        'createNestedArchiveDirectory',
+      );
+      if (directory == null) throw const ArchiveFailure('无法创建子包暂存目录');
+      _nestedDirectories.add(directory);
+      if (!mounted) return;
+      final destination = p.join(
+        directory,
+        p.posix.basename(entry.normalizedPath),
+      );
+      while (mounted) {
+        try {
+          final result = await _run(
+            '准备子压缩包',
+            ArchiveRequest(
+              'export',
+              archive,
+              destination: destination,
+              password: password,
+              codePage: _archiveCodePage,
+              itemPath: entry.normalizedPath,
+              expectedVersion: version,
+              indices: [entry.index],
+              outputLimit: nestedArchiveLimit,
+            ),
+          );
+          if (result == null || !mounted) return;
+          break;
+        } on ArchiveFailure catch (error) {
+          if (!error.passwordRequired) rethrow;
+          final value = await _askPassword(error: error.message);
+          if (value == null || !mounted) return;
+          password = value;
+        }
+      }
+      if (!mounted) return;
+      final parent = ArchiveParent(
+        archive: archive,
+        password: password,
+        codePage: _archiveCodePage,
+        folder: _folder,
+        query: _query,
+        selection: Set.of(_selected),
+        navigation: List.of(_navigation),
+        navigationIndex: _navigationIndex,
+        directory: directory,
+      );
+      // 交接给统一打开流程，期间继续由打开流程占用操作入口。
+      _openingFile = false;
+      if (!await _open(destination, nested: true) || !mounted) return;
+      setState(() {
+        _archiveParents.add(parent);
+        _status = '已进入子包 · ${entry.normalizedPath}';
+      });
+      retained = true;
+    } catch (error) {
+      if (mounted) await _error(error);
+    } finally {
+      if (!retained && directory != null) {
+        await _discardNestedDirectory(directory);
+      }
+      _openingFile = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _returnToParentArchive() async {
+    if (!_interactive || _archiveParents.isEmpty) return;
+    final parent = _archiveParents.last;
+    final nested = _archiveParents.length > 1;
+    if (!await _open(
+          parent.archive,
+          password: parent.password,
+          codePage: parent.codePage,
+          nested: nested,
+        ) ||
+        !mounted) {
+      return;
+    }
+    bool folderExists(String folder) =>
+        folder.isEmpty ||
+        _entries.any(
+          (entry) =>
+              (entry.directory && entry.normalizedPath == folder) ||
+              entry.normalizedPath.startsWith('$folder/'),
+        );
+    setState(() {
+      if (nested) _archiveParents.removeLast();
+      _folder = folderExists(parent.folder) ? parent.folder : '';
+      _query = parent.query;
+      _search.text = _query;
+      _navigation
+        ..clear()
+        ..addAll(parent.navigation.where(folderExists));
+      if (_navigation.isEmpty) _navigation.add('');
+      _navigationIndex = _navigation.lastIndexOf(_folder);
+      if (_navigationIndex < 0) {
+        _navigation.add(_folder);
+        _navigationIndex = _navigation.length - 1;
+      } else if (parent.navigationIndex < _navigation.length &&
+          _navigation[parent.navigationIndex] == _folder) {
+        _navigationIndex = parent.navigationIndex;
+      }
+      _selected.addAll(
+        parent.selection.where(
+          (path) => _entries.any(
+            (entry) =>
+                entry.normalizedPath == path ||
+                entry.normalizedPath.startsWith('$path/'),
+          ),
+        ),
+      );
+      _status = '已返回父包 · ${p.basename(parent.archive)}';
+    });
+    if (nested) await _discardNestedDirectory(parent.directory);
   }
 
   bool get _canPreview {
@@ -1558,7 +1754,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       widget.onSettingsChanged?.call(preferences);
       final archive = _archive;
       if (encodingChanged && archive != null) {
-        await _open(archive, password: _password);
+        await _open(
+          archive,
+          password: _password,
+          nested: _archiveParents.isNotEmpty,
+        );
       }
     }
   }
@@ -1697,7 +1897,13 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       _selected.clear();
       _selected.add(row.path);
     });
-    if (row.entry != null) _openFile(row.entry!);
+    if (row.entry != null) {
+      if (isNestedArchive(row.path)) {
+        _enterNestedArchive(row.entry!);
+      } else {
+        _openFile(row.entry!);
+      }
+    }
   }
 
   Future<void> _rowMenu(_VisibleEntry row, Offset position) async {
@@ -1717,6 +1923,8 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         Offset.zero & overlay.size,
       ),
       items: [
+        if (!row.directory && isNestedArchive(row.path))
+          const PopupMenuItem(value: 'nested', child: Text('进入子压缩包')),
         PopupMenuItem(value: 'open', child: Text(row.directory ? '打开' : '查看')),
         if (!row.directory && row.entry != null)
           PopupMenuItem(
@@ -1759,6 +1967,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     );
     if (!mounted || !_available) return;
     switch (action) {
+      case 'nested':
+        if (row.entry != null) await _enterNestedArchive(row.entry!);
+        break;
       case 'preview':
         if (row.entry != null) await _previewFile(row.entry!);
         break;
@@ -1993,6 +2204,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       'mkdir': _interactive && _editable && archive != null,
       'remove': _interactive && _editable && _selected.isNotEmpty,
       'rename': _interactive && _editable && _selected.length == 1,
+      'nested':
+          _interactive &&
+          _selectedFile != null &&
+          isNestedArchive(_selectedFile!.normalizedPath),
+      'parentArchive': _interactive && _archiveParents.isNotEmpty,
       'preview': _canPreview,
       'view': _interactive && _selectedFile != null,
       'edit': _interactive && _editable && _selectedFile != null,
@@ -2277,6 +2493,18 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
             }
           },
           itemBuilder: (_) => [
+            PopupMenuItem(
+              value: 'nested',
+              enabled:
+                  _selectedFile != null &&
+                  isNestedArchive(_selectedFile!.normalizedPath),
+              child: const Text('进入子压缩包'),
+            ),
+            PopupMenuItem(
+              value: 'parentArchive',
+              enabled: _archiveParents.isNotEmpty,
+              child: const Text('返回父压缩包'),
+            ),
             PopupMenuItem(
               value: 'preview',
               enabled: _canPreview,
@@ -2825,7 +3053,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
                       borderRadius: BorderRadius.circular(6),
                     ),
                     child: Text(
-                      _editable ? '可编辑' : '只读浏览',
+                      _archiveParents.isNotEmpty
+                          ? '子包 · 只读浏览'
+                          : (_editable ? '可编辑' : '只读浏览'),
                       style: TextStyle(
                         fontSize: 11,
                         color: AppColors.of(context).secondary,
@@ -2846,6 +3076,15 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               ),
               child: Row(
                 children: [
+                  if (_archiveParents.isNotEmpty)
+                    IconButton(
+                      tooltip: '返回父压缩包',
+                      icon: const Icon(
+                        Icons.drive_folder_upload_outlined,
+                        size: 18,
+                      ),
+                      onPressed: _interactive ? _returnToParentArchive : null,
+                    ),
                   IconButton(
                     tooltip: '后退',
                     icon: const Icon(Icons.arrow_back, size: 17),

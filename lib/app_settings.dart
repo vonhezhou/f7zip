@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import 'app_theme.dart';
 import 'filename_encoding.dart';
+import 'compression_preset.dart';
 
 const _desktop = MethodChannel('sevenzip/desktop');
 
@@ -18,28 +19,71 @@ class AppSettings {
     this.themeMode = ThemeMode.system,
     this.colorTheme = AppColorTheme.purple,
     this.filenameEncoding = FilenameEncoding.autoDetect,
+    this.compressionPresets = const [],
+    this.defaultCompressionPreset = '',
   });
 
-  factory AppSettings.fromJson(Map<dynamic, dynamic> json) => AppSettings(
-    alternateRows: json['alternateRows'] as bool? ?? true,
-    singleClickOpen: json['singleClickOpen'] as bool? ?? true,
-    showDotEntries: json['showDotEntries'] as bool? ?? true,
-    removeRedundantRoot: json['removeRedundantRoot'] as bool? ?? false,
-    smartExtraction: json['smartExtraction'] as bool? ?? false,
-    viewer: json['viewer'] as String? ?? '',
-    editor: json['editor'] as String? ?? '',
-    themeMode: ThemeMode.values.firstWhere(
-      (mode) => mode.name == json['themeMode'],
-      orElse: () => ThemeMode.system,
-    ),
-    filenameEncoding: FilenameEncoding.values.firstWhere(
-      (encoding) => encoding.name == json['filenameEncoding'],
-      orElse: () => FilenameEncoding.autoDetect,
-    ),
-    colorTheme: AppColorTheme.values.firstWhere(
-      (theme) => theme.name == json['colorTheme'],
-      orElse: () => AppColorTheme.purple,
-    ),
+  factory AppSettings.fromJson(Map<dynamic, dynamic> json) {
+    final presets = <CompressionPreset>[];
+    final stored = json['compressionPresets'];
+    if (stored is List) {
+      for (final entry in stored) {
+        if (entry is! Map) continue;
+        final preset = CompressionPreset.fromJson(entry);
+        if (preset.name.isNotEmpty &&
+            !presets.any((item) => item.name == preset.name)) {
+          presets.add(preset);
+        }
+      }
+    }
+    final defaultName = json['defaultCompressionPreset'];
+    return AppSettings(
+      compressionPresets: List.unmodifiable(presets),
+      defaultCompressionPreset:
+          presets.any((preset) => preset.name == defaultName)
+          ? defaultName as String
+          : '',
+      alternateRows: json['alternateRows'] as bool? ?? true,
+      singleClickOpen: json['singleClickOpen'] as bool? ?? true,
+      showDotEntries: json['showDotEntries'] as bool? ?? true,
+      removeRedundantRoot: json['removeRedundantRoot'] as bool? ?? false,
+      smartExtraction: json['smartExtraction'] as bool? ?? false,
+      viewer: json['viewer'] as String? ?? '',
+      editor: json['editor'] as String? ?? '',
+      themeMode: ThemeMode.values.firstWhere(
+        (mode) => mode.name == json['themeMode'],
+        orElse: () => ThemeMode.system,
+      ),
+      filenameEncoding: FilenameEncoding.values.firstWhere(
+        (encoding) => encoding.name == json['filenameEncoding'],
+        orElse: () => FilenameEncoding.autoDetect,
+      ),
+      colorTheme: AppColorTheme.values.firstWhere(
+        (theme) => theme.name == json['colorTheme'],
+        orElse: () => AppColorTheme.purple,
+      ),
+    );
+  }
+
+  final List<CompressionPreset> compressionPresets;
+  final String defaultCompressionPreset;
+
+  AppSettings withCompressionPresets(
+    List<CompressionPreset> presets,
+    String defaultName,
+  ) => AppSettings(
+    alternateRows: alternateRows,
+    singleClickOpen: singleClickOpen,
+    showDotEntries: showDotEntries,
+    removeRedundantRoot: removeRedundantRoot,
+    smartExtraction: smartExtraction,
+    viewer: viewer,
+    editor: editor,
+    themeMode: themeMode,
+    colorTheme: colorTheme,
+    filenameEncoding: filenameEncoding,
+    compressionPresets: List.unmodifiable(presets),
+    defaultCompressionPreset: defaultName,
   );
 
   final bool alternateRows;
@@ -54,6 +98,10 @@ class AppSettings {
   final FilenameEncoding filenameEncoding;
 
   Map<String, dynamic> toJson() => {
+    'compressionPresets': compressionPresets
+        .map((preset) => preset.toJson())
+        .toList(),
+    'defaultCompressionPreset': defaultCompressionPreset,
     'alternateRows': alternateRows,
     'singleClickOpen': singleClickOpen,
     'showDotEntries': showDotEntries,
@@ -75,6 +123,8 @@ class SettingsDialog extends StatefulWidget {
 }
 
 class _SettingsDialogState extends State<SettingsDialog> {
+  late String _defaultCompressionPreset =
+      widget.initial.defaultCompressionPreset;
   late ThemeMode _themeMode = widget.initial.themeMode;
   late AppColorTheme _colorTheme = widget.initial.colorTheme;
   late FilenameEncoding _filenameEncoding = widget.initial.filenameEncoding;
@@ -155,6 +205,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   Future<void> _save() async {
     final settings = AppSettings(
+      compressionPresets: widget.initial.compressionPresets,
+      defaultCompressionPreset: _defaultCompressionPreset,
       themeMode: _themeMode,
       colorTheme: _colorTheme,
       filenameEncoding: _filenameEncoding,
@@ -194,7 +246,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       data: buildAppTheme(brightness, colorTheme: _colorTheme),
       child: Builder(
         builder: (context) => DefaultTabController(
-          length: 3,
+          length: 4,
           child: AlertDialog(
             titlePadding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
             contentPadding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
@@ -207,6 +259,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   const TabBar(
                     tabs: [
                       Tab(height: 36, text: '常规'),
+                      Tab(height: 36, text: '压缩'),
                       Tab(height: 36, text: '文件关联'),
                       Tab(height: 36, text: '外部程序'),
                     ],
@@ -353,6 +406,51 @@ class _SettingsDialogState extends State<SettingsDialog> {
                               onChanged: (value) =>
                                   setState(() => _showDotEntries = value),
                             ),
+                          ],
+                        ),
+                        ListView(
+                          children: [
+                            DropdownButtonFormField<String>(
+                              key: const ValueKey('defaultCompressionPreset'),
+                              initialValue: _defaultCompressionPreset,
+                              isExpanded: true,
+                              decoration: const InputDecoration(
+                                labelText: '默认压缩预设',
+                              ),
+                              items: [
+                                const DropdownMenuItem(
+                                  value: '',
+                                  child: Text('使用标准设置'),
+                                ),
+                                for (final preset
+                                    in widget.initial.compressionPresets)
+                                  DropdownMenuItem(
+                                    value: preset.name,
+                                    child: Text(
+                                      preset.name,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                              ],
+                              onChanged: (value) => setState(
+                                () => _defaultCompressionPreset = value!,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            const Text(
+                              '在“新建压缩包”中保存、更新和删除预设。默认预设用于主窗口与 Finder 的配置压缩入口。密码按每次任务输入。',
+                            ),
+                            const SizedBox(height: 8),
+                            for (final preset
+                                in widget.initial.compressionPresets)
+                              ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                title: Text(preset.name),
+                                subtitle: Text(
+                                  '${preset.format.toUpperCase()} · 等级 ${preset.level} · ${preset.volumeSize == 0 ? '不分卷' : '${preset.volumeSize ~/ 1048576} MiB / 卷'}',
+                                ),
+                              ),
                           ],
                         ),
                         Column(

@@ -11,6 +11,7 @@ import 'archive_tree.dart';
 import 'app_settings.dart';
 import 'edit_workspace.dart';
 import 'app_theme.dart';
+import 'compression_preset.dart';
 
 const _desktop = MethodChannel('sevenzip/desktop');
 
@@ -721,13 +722,26 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     }
   }
 
+  Future<void> _saveCompressionPresets(
+    List<CompressionPreset> presets,
+    String defaultName,
+  ) async {
+    final settings = _preferences.withCompressionPresets(presets, defaultName);
+    await _desktop.invokeMethod<void>('saveSettings', settings.toJson());
+    if (mounted) setState(() => _preferences = settings);
+  }
+
   Future<void> _create([List<String>? dropped]) async {
     if (!_interactive) return;
     final inputs = dropped ?? await _choose('chooseInputs');
     if (inputs.isEmpty || !mounted) return;
     final options = await showDialog<_CompressionOptions>(
       context: context,
-      builder: (_) => _CompressionDialog(inputs: inputs),
+      builder: (_) => _CompressionDialog(
+        inputs: inputs,
+        settings: _preferences,
+        onPresetsChanged: _saveCompressionPresets,
+      ),
     );
     if (options == null || !mounted || !_available) return;
     setState(() => _choosing = true);
@@ -3042,8 +3056,14 @@ class _CompressionOptions {
 }
 
 class _CompressionDialog extends StatefulWidget {
-  const _CompressionDialog({required this.inputs});
+  const _CompressionDialog({
+    required this.inputs,
+    required this.settings,
+    required this.onPresetsChanged,
+  });
   final List<String> inputs;
+  final AppSettings settings;
+  final Future<void> Function(List<CompressionPreset>, String) onPresetsChanged;
   @override
   State<_CompressionDialog> createState() => _CompressionDialogState();
 }
@@ -3071,6 +3091,115 @@ class _CompressionDialogState extends State<_CompressionDialog> {
   bool get _validInput =>
       !_singleFileFormat ||
       (widget.inputs.length == 1 && File(widget.inputs.single).existsSync());
+  late List<CompressionPreset> _presets;
+  late String _defaultPreset;
+  String _presetName = '';
+  int _presetRevision = 0;
+  bool _savingPreset = false;
+  String? _presetError;
+
+  @override
+  void initState() {
+    super.initState();
+    _presets = widget.settings.compressionPresets.toList();
+    _defaultPreset = widget.settings.defaultCompressionPreset;
+    final initial = _presets
+        .where((preset) => preset.name == _defaultPreset)
+        .firstOrNull;
+    if (initial != null) _loadPreset(initial);
+  }
+
+  void _loadPreset(CompressionPreset preset) {
+    _presetRevision++;
+    _presetName = preset.name;
+    _format = preset.format;
+    _level = preset.level;
+    _encryption = preset.encryption;
+    _encryptNames = preset.encryptNames;
+    final mib = preset.volumeSize ~/ 1048576;
+    _volume = mib == 0
+        ? 'none'
+        : const {10, 100, 500, 2048}.contains(mib)
+        ? '$mib'
+        : 'custom';
+    _customVolume.text = mib == 0 ? '' : '$mib';
+  }
+
+  void _changeOptions(VoidCallback change) {
+    setState(() {
+      change();
+      _presetName = '';
+    });
+  }
+
+  Future<void> _persistPresets(
+    List<CompressionPreset> presets,
+    String defaultName,
+    String selection,
+  ) async {
+    setState(() {
+      _savingPreset = true;
+      _presetError = null;
+    });
+    try {
+      await widget.onPresetsChanged(presets, defaultName);
+      if (mounted) {
+        setState(() {
+          _presets = presets;
+          _defaultPreset = defaultName;
+          _presetName = selection;
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => _presetError = '预设保存失败。$error');
+    } finally {
+      if (mounted) setState(() => _savingPreset = false);
+    }
+  }
+
+  Future<void> _savePreset() async {
+    final result = await showDialog<(String, bool)>(
+      context: context,
+      builder: (_) => _SaveCompressionPresetDialog(
+        initialName: _presetName,
+        defaultName: _defaultPreset,
+      ),
+    );
+    if (result == null || !mounted || _volumeSize == null) return;
+    final preset = CompressionPreset(
+      name: result.$1,
+      format: _format,
+      level: _level,
+      volumeSize: _volumeSize!,
+      encryption: _encryption,
+      encryptNames: _encryptNames,
+    );
+    final presets = _presets.toList();
+    final index = presets.indexWhere((item) => item.name == preset.name);
+    if (index < 0) {
+      presets.add(preset);
+    } else {
+      presets[index] = preset;
+    }
+    final defaultName = result.$2
+        ? preset.name
+        : _defaultPreset == preset.name
+        ? ''
+        : _defaultPreset;
+    await _persistPresets(presets, defaultName, preset.name);
+  }
+
+  Future<void> _deletePreset() async {
+    final presets = _presets
+        .where((preset) => preset.name != _presetName)
+        .toList();
+    await _persistPresets(
+      presets,
+      _defaultPreset == _presetName ? '' : _defaultPreset,
+      '',
+    );
+  }
+
   @override
   void dispose() {
     _customVolume.dispose();
@@ -3088,6 +3217,74 @@ class _CompressionDialogState extends State<_CompressionDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Row(
+              children: [
+                Expanded(
+                  child: InputDecorator(
+                    decoration: const InputDecoration(labelText: '压缩预设'),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        key: const ValueKey('compressionPreset'),
+                        value: _presetName,
+                        isDense: true,
+                        isExpanded: true,
+                        items: [
+                          const DropdownMenuItem(
+                            value: '',
+                            child: Text('自定义设置'),
+                          ),
+                          for (final preset in _presets)
+                            DropdownMenuItem(
+                              value: preset.name,
+                              child: Text(
+                                '${preset.name}${preset.name == _defaultPreset ? ' · 默认' : ''}',
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: _savingPreset
+                            ? null
+                            : (value) => setState(() {
+                                if (value == '') {
+                                  _presetName = '';
+                                } else {
+                                  _loadPreset(
+                                    _presets.firstWhere(
+                                      (preset) => preset.name == value,
+                                    ),
+                                  );
+                                }
+                              }),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                IconButton(
+                  tooltip: '保存压缩预设',
+                  onPressed: _savingPreset || _volumeSize == null
+                      ? null
+                      : _savePreset,
+                  icon: const Icon(Icons.bookmark_add_outlined, size: 20),
+                ),
+                IconButton(
+                  tooltip: '删除压缩预设',
+                  onPressed: _savingPreset || _presetName.isEmpty
+                      ? null
+                      : _deletePreset,
+                  icon: const Icon(Icons.delete_outline, size: 20),
+                ),
+              ],
+            ),
+            if (_presetError != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  _presetError!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+            const SizedBox(height: 12),
             Text(
               '已选择 ${widget.inputs.length} 个文件或文件夹',
               style: TextStyle(
@@ -3113,6 +3310,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
             ),
             const SizedBox(height: 12),
             Row(
+              key: ValueKey('presetFormat:$_presetRevision'),
               children: [
                 Expanded(
                   child: DropdownButtonFormField<String>(
@@ -3140,7 +3338,9 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                         child: Text('BZIP2 · 单文件'),
                       ),
                     ],
-                    onChanged: (value) => setState(() => _format = value!),
+                    onChanged: _savingPreset
+                        ? null
+                        : (value) => _changeOptions(() => _format = value!),
                   ),
                 ),
                 const SizedBox(width: 14),
@@ -3155,36 +3355,42 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                       DropdownMenuItem(value: 7, child: Text('最大')),
                       DropdownMenuItem(value: 9, child: Text('极限')),
                     ],
-                    onChanged: _format == 'tar'
+                    onChanged: _savingPreset || _format == 'tar'
                         ? null
-                        : (value) => setState(() => _level = value!),
+                        : (value) => _changeOptions(() => _level = value!),
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 12),
             if (_supportsPassword) ...[
-              DropdownButtonFormField<String>(
-                key: const ValueKey('volumeSize'),
-                initialValue: _volume,
-                decoration: const InputDecoration(labelText: '分卷大小'),
-                items: const [
-                  DropdownMenuItem(value: 'none', child: Text('不分卷')),
-                  DropdownMenuItem(value: '10', child: Text('10 MiB')),
-                  DropdownMenuItem(value: '100', child: Text('100 MiB')),
-                  DropdownMenuItem(value: '500', child: Text('500 MiB')),
-                  DropdownMenuItem(value: '2048', child: Text('2 GiB')),
-                  DropdownMenuItem(value: 'custom', child: Text('自定义')),
-                ],
-                onChanged: (value) => setState(() => _volume = value!),
+              KeyedSubtree(
+                key: ValueKey('presetVolume:$_presetRevision'),
+                child: DropdownButtonFormField<String>(
+                  key: const ValueKey('volumeSize'),
+                  initialValue: _volume,
+                  decoration: const InputDecoration(labelText: '分卷大小'),
+                  items: const [
+                    DropdownMenuItem(value: 'none', child: Text('不分卷')),
+                    DropdownMenuItem(value: '10', child: Text('10 MiB')),
+                    DropdownMenuItem(value: '100', child: Text('100 MiB')),
+                    DropdownMenuItem(value: '500', child: Text('500 MiB')),
+                    DropdownMenuItem(value: '2048', child: Text('2 GiB')),
+                    DropdownMenuItem(value: 'custom', child: Text('自定义')),
+                  ],
+                  onChanged: _savingPreset
+                      ? null
+                      : (value) => _changeOptions(() => _volume = value!),
+                ),
               ),
               if (_volume == 'custom') ...[
                 const SizedBox(height: 12),
                 TextField(
                   key: const ValueKey('customVolumeSize'),
+                  enabled: !_savingPreset,
                   controller: _customVolume,
                   keyboardType: TextInputType.number,
-                  onChanged: (_) => setState(() {}),
+                  onChanged: (_) => _changeOptions(() {}),
                   decoration: InputDecoration(
                     labelText: '每卷大小（MiB）',
                     errorText: _volumeSize == null ? '请输入 1–2097151 的整数' : null,
@@ -3200,6 +3406,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
             ],
             if (_supportsPassword)
               TextField(
+                key: const ValueKey('compressionPassword'),
                 controller: _password,
                 obscureText: !_showPassword,
                 decoration: InputDecoration(
@@ -3220,6 +3427,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
             const SizedBox(height: 12),
             if (_format == 'zip')
               DropdownButtonFormField<String>(
+                key: ValueKey('presetEncryption:$_presetRevision'),
                 initialValue: _encryption,
                 decoration: const InputDecoration(labelText: '加密算法'),
                 items: const [
@@ -3229,7 +3437,9 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                     child: Text('ZipCrypto · 兼容旧解压工具'),
                   ),
                 ],
-                onChanged: (value) => setState(() => _encryption = value!),
+                onChanged: _savingPreset
+                    ? null
+                    : (value) => _changeOptions(() => _encryption = value!),
               ),
             if (_format == '7z')
               CheckboxListTile(
@@ -3237,7 +3447,9 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                 dense: true,
                 title: const Text('同时加密文件名'),
                 value: _encryptNames,
-                onChanged: (value) => setState(() => _encryptNames = value!),
+                onChanged: _savingPreset
+                    ? null
+                    : (value) => _changeOptions(() => _encryptNames = value!),
               ),
             const SizedBox(height: 12),
             Text(
@@ -3269,7 +3481,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
         child: const Text('取消'),
       ),
       FilledButton(
-        onPressed: !_validInput || _volumeSize == null
+        onPressed: _savingPreset || !_validInput || _volumeSize == null
             ? null
             : () => Navigator.pop(
                 context,
@@ -3284,6 +3496,92 @@ class _CompressionDialogState extends State<_CompressionDialog> {
               ),
         child: const Text('选择保存位置'),
       ),
+    ],
+  );
+}
+
+class _SaveCompressionPresetDialog extends StatefulWidget {
+  const _SaveCompressionPresetDialog({
+    required this.initialName,
+    required this.defaultName,
+  });
+  final String initialName;
+  final String defaultName;
+  @override
+  State<_SaveCompressionPresetDialog> createState() =>
+      _SaveCompressionPresetDialogState();
+}
+
+class _SaveCompressionPresetDialogState
+    extends State<_SaveCompressionPresetDialog> {
+  late final _name = TextEditingController(text: widget.initialName);
+  late bool _default =
+      widget.initialName.isNotEmpty && widget.initialName == widget.defaultName;
+  bool _defaultTouched = false;
+  String? _error;
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final name = _name.text.trim();
+    if (name.isEmpty || name.length > 40) {
+      setState(() => _error = '请输入 1–40 个字符的名称');
+      return;
+    }
+    Navigator.pop(context, (name, _default));
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('保存压缩预设'),
+    content: SizedBox(
+      width: 360,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            key: const ValueKey('presetName'),
+            controller: _name,
+            autofocus: true,
+            decoration: InputDecoration(
+              labelText: '预设名称',
+              helperText: '相同名称会更新已有预设',
+              errorText: _error,
+            ),
+            onSubmitted: (_) => _submit(),
+            onChanged: (value) {
+              if (!_defaultTouched) {
+                setState(
+                  () => _default =
+                      value.trim().isNotEmpty &&
+                      value.trim() == widget.defaultName,
+                );
+              }
+            },
+          ),
+          CheckboxListTile(
+            key: const ValueKey('presetDefault'),
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: const Text('设为默认预设'),
+            value: _default,
+            onChanged: (value) => setState(() {
+              _default = value!;
+              _defaultTouched = true;
+            }),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('取消'),
+      ),
+      FilledButton(onPressed: _submit, child: const Text('保存预设')),
     ],
   );
 }

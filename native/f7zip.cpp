@@ -1649,6 +1649,10 @@ static char* mutateArchive(
         std::string paths = "[";
         for (const auto& path : conflict.paths) { if (paths.size() > 1) paths += ','; paths += quote(path); }
         return result("{\"ok\":false,\"error\":" + quote(conflict.what()) + ",\"conflicts\":" + paths + "]}");
+    } catch (const BitException& error) {
+        const bool passwordRequired = error.code() == BitFailureSource::WrongPassword;
+        return result("{\"ok\":false,\"cancelled\":" + std::string(job->cancelled ? "true" : "false") +
+            ",\"passwordRequired\":" + (passwordRequired ? "true" : "false") + ",\"error\":" + quote(error.what()) + "}");
     } catch (const std::exception& error) {
         return result("{\"ok\":false,\"cancelled\":" + std::string(job->cancelled ? "true" : "false") +
             ",\"error\":" + quote(error.what()) + "}");

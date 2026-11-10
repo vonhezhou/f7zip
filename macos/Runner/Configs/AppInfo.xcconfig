@@ -1,0 +1,3 @@
+PRODUCT_NAME = F7Zip
+PRODUCT_BUNDLE_IDENTIFIER = dev.von.f7zip
+PRODUCT_COPYRIGHT = Copyright © 2026 F7Zip contributors.

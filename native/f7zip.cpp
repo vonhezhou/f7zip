@@ -26,6 +26,7 @@
 #include <fcntl.h>
 #include <copyfile.h>
 #include <map>
+#include <regex>
 #include <set>
 #include <iomanip>
 
@@ -162,6 +163,69 @@ static std::string archiveVersion(const char* path) {
         std::to_string(info.st_size) + ":" + std::to_string(info.st_mtimespec.tv_sec) + ":" +
         std::to_string(info.st_mtimespec.tv_nsec) + ":" + std::to_string(info.st_ctimespec.tv_sec) + ":" +
         std::to_string(info.st_ctimespec.tv_nsec);
+}
+
+// 对同组分卷记录全部文件的版本，解压发布前检测任一卷被替换、增删或修改。
+static std::string volumeFamily(const std::string& name) {
+    static const std::vector<std::regex> patterns = {
+        std::regex(R"(^([\s\S]*)\.[0-9]{3,}$)", std::regex::icase),
+        std::regex(R"(^([\s\S]*)\.(zip|z[0-9]{2,})$)", std::regex::icase),
+        std::regex(R"(^([\s\S]*)\.part[0-9]+\.rar$)", std::regex::icase),
+        std::regex(R"(^([\s\S]*)\.(rar|r[0-9]{2,})$)", std::regex::icase)
+    };
+    for (size_t index = 0; index < patterns.size(); ++index) {
+        std::smatch match;
+        if (std::regex_match(name, match, patterns[index])) {
+            auto key = std::to_string(index) + ":" + match[1].str();
+            std::transform(key.begin(), key.end(), key.begin(),
+                [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+            return key;
+        }
+    }
+    return {};
+}
+
+static std::string volumeVersion(const char* archive) {
+    const auto path = localfs::absolute(archive);
+    const auto family = volumeFamily(path.filename().string());
+    if (family.empty()) return archiveVersion(archive);
+    std::map<std::string, std::string> versions;
+    for (const auto& entry : localfs::directory_iterator(path.parent_path())) {
+        if (entry.is_regular_file() && volumeFamily(entry.path().filename().string()) == family) {
+            versions.emplace(entry.path().filename().string(), archiveVersion(entry.path().c_str()));
+        }
+    }
+    std::string version;
+    for (const auto& [name, value] : versions) version += name + "=" + value + "\n";
+    return version;
+}
+
+static localfs::path unpackSingleArchive(BitArchiveReader& reader, Job* job,
+    std::vector<std::unique_ptr<StagingDirectory>>& intermediates) {
+    for (const auto& item : reader.items()) validateEntry(item);
+    intermediates.push_back(std::make_unique<StagingDirectory>(localfs::temp_directory_path()));
+    const auto& directory = intermediates.back()->path;
+    reader.extractTo(directory.string());
+    checkCancellation(job);
+    auto contents = localfs::directory_iterator(directory);
+    if (contents == localfs::directory_iterator()) throw std::runtime_error("归档缺少内层文件");
+    const auto inner = contents->path();
+    if (!localfs::is_regular_file(localfs::symlink_status(inner)) || ++contents != localfs::directory_iterator()) {
+        throw std::runtime_error("归档需要包含唯一的内层文件");
+    }
+    return inner;
+}
+
+static void validateVolumes(BitArchiveReader& reader) {
+    if (!reader.isMultiVolume()) return;
+    const auto error = reader.archiveProperty(BitProperty::Error);
+    if (error.isString() && !error.getString().empty()) {
+        throw std::runtime_error("分卷不完整，请补齐全部分卷。" + error.getString());
+    }
+    const auto flags = reader.archiveProperty(BitProperty::ErrorFlags);
+    if (!flags.isEmpty() && flags.getUInt32() != 0) {
+        throw std::runtime_error("分卷缺失、顺序错误或损坏，请核对全部分卷");
+    }
 }
 
 static std::string archiveItems(BitArchiveReader& reader, Job* job) {
@@ -380,6 +444,7 @@ __attribute__((visibility("default"))) char* f7_run(
     Job* job, const char* engine, const char* operation, const char* archive,
     const char* destination, const char* password, const char* format, int level,
     const char* const* inputs, int inputCount, const uint32_t* indices, int indexCount) {
+    bool multiVolume = false;
     try {
         checkCancellation(job);
         Bit7zLibrary library(engine);
@@ -440,13 +505,42 @@ __attribute__((visibility("default"))) char* f7_run(
             publish(output, target);
             return result("{\"ok\":true,\"path\":" + quote(target.string()) + "}");
         }
+        const auto name = localfs::path(archive).filename().string();
+        static const std::regex volumeName(R"((\.[0-9]{3,}|\.part[0-9]+\.rar|\.z[0-9]{2,}|\.r[0-9]{2,})$)", std::regex::icase);
+        multiVolume = std::regex_search(name, volumeName);
+        static const std::regex zipName(R"(\.zip$)", std::regex::icase);
+        auto firstZipVolume = localfs::path(archive);
+        firstZipVolume.replace_extension(".z01");
+        multiVolume = multiVolume || (std::regex_search(name, zipName) && localfs::exists(firstZipVolume));
+        static const std::regex numberedName(R"(^[\s\S]*(?:\.([0-9]{3,})|\.part([0-9]+)\.rar)$)", std::regex::icase);
+        std::smatch number;
+        if (std::regex_match(name, number, numberedName)) {
+            const auto digits = number[1].matched ? number[1].str() : number[2].str();
+            const auto first = digits.find_first_not_of('0');
+            if (first == std::string::npos || digits.substr(first) != "1") {
+                throw std::runtime_error("请从第一个分卷打开（.001 或 .part1.rar），并将全部分卷放在同一文件夹");
+            }
+        }
         const auto initialVersion = archiveVersion(archive);
+        const auto initialVolumes = volumeVersion(archive);
         ZipEncodingScope encoding(engine, archive, job->codePage);
-        // 复合归档的索引始终指向内层 TAR，浏览、选中解压与完整性测试共用同一入口。
-        std::unique_ptr<StagingDirectory> intermediate;
+        // 展开封装层后，浏览、选中解压与测试共用同一内层归档和索引。
+        std::vector<std::unique_ptr<StagingDirectory>> intermediates;
         auto opened = std::make_unique<BitArchiveReader>(library, archive, BitFormat::Auto, password);
         callbacks(*opened, job);
-        std::string archiveName = localfs::path(archive).filename().string();
+        multiVolume = opened->isMultiVolume();
+        const auto volumeCount = opened->volumesCount();
+        validateVolumes(*opened);
+        localfs::path readPath = archive;
+        if (opened->detectedFormat() == BitFormat::Split) {
+            multiVolume = true;
+            readPath = unpackSingleArchive(*opened, job, intermediates);
+            if (job->codePage == 0) encoding.detectArchive(readPath.c_str());
+            opened = std::make_unique<BitArchiveReader>(library, readPath.string(), BitFormat::Auto, password);
+            callbacks(*opened, job);
+        }
+        const auto readVersion = multiVolume ? initialVolumes : initialVersion;
+        std::string archiveName = readPath.filename().string();
         std::transform(archiveName.begin(), archiveName.end(), archiveName.begin(),
             [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
         const std::vector<std::string> tarSuffixes = {".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz"};
@@ -455,30 +549,22 @@ __attribute__((visibility("default"))) char* f7_run(
         });
         const auto& outerFormat = opened->detectedFormat();
         if (namedTar && (outerFormat == BitFormat::GZip || outerFormat == BitFormat::BZip2 || outerFormat == BitFormat::Xz)) {
-            for (const auto& item : opened->items()) validateEntry(item);
-            intermediate = std::make_unique<StagingDirectory>(localfs::temp_directory_path());
-            opened->extractTo(intermediate->path.string());
-            checkCancellation(job);
-            auto contents = localfs::directory_iterator(intermediate->path);
-            if (contents == localfs::directory_iterator()) throw std::runtime_error("复合归档缺少内层 TAR");
-            const auto tar = contents->path();
-            if (!localfs::is_regular_file(localfs::symlink_status(tar)) || ++contents != localfs::directory_iterator()) {
-                throw std::runtime_error("复合归档的内层 TAR 无效");
-            }
+            const auto tar = unpackSingleArchive(*opened, job, intermediates);
             opened = std::make_unique<BitArchiveReader>(library, tar.string(), BitFormat::Tar, password);
             callbacks(*opened, job);
         }
         auto& reader = *opened;
         if (op == "list") {
             auto items = archiveItems(reader, job);
-            if (archiveVersion(archive) != initialVersion) throw std::runtime_error("读取期间压缩包已变化，请重新打开");
-            const bool editable = reader.detectedFormat() == BitFormat::Zip || reader.detectedFormat() == BitFormat::SevenZip;
-            return result("{\"ok\":true,\"codePage\":" + std::to_string(encoding.codePage()) + ",\"version\":" + quote(initialVersion) +
+            if (volumeVersion(archive) != initialVolumes) throw std::runtime_error("读取期间压缩包或分卷已变化，请重新打开");
+            const bool editable = !multiVolume && (reader.detectedFormat() == BitFormat::Zip || reader.detectedFormat() == BitFormat::SevenZip);
+            return result("{\"ok\":true,\"codePage\":" + std::to_string(encoding.codePage()) + ",\"volumes\":" + std::to_string(volumeCount) + ",\"version\":" + quote(readVersion) +
                 ",\"editable\":" + (editable ? "true" : "false") + ",\"comment\":" + quote(archiveComment(reader)) + ",\"items\":" + items + "}");
         }
         if (op == "test") {
             reader.test();
             checkCancellation(job);
+            if (volumeVersion(archive) != initialVolumes) throw std::runtime_error("测试期间压缩包或分卷已变化，请重新打开");
             return result("{\"ok\":true}");
         }
         if (op != "extract" && op != "extractHere" && op != "extractFlat" && op != "extractHereFlat") throw std::runtime_error("未知操作");
@@ -496,18 +582,20 @@ __attribute__((visibility("default"))) char* f7_run(
             reader.extractTo(staging.path.string());
         }
         checkCancellation(job);
-        if (archiveVersion(archive) != initialVersion) throw std::runtime_error("解压期间压缩包已变化，请重新打开");
+        if (volumeVersion(archive) != initialVolumes) throw std::runtime_error("解压期间压缩包或分卷已变化，请重新打开");
         const auto root = extractionRoot(staging.path, op == "extractFlat" || op == "extractHereFlat");
         if (intoExisting) publishContents(root, target);
         else publish(root, target);
-        return result("{\"ok\":true,\"version\":" + quote(initialVersion) + ",\"path\":" + quote(target.string()) + "}");
+        return result("{\"ok\":true,\"version\":" + quote(readVersion) + ",\"path\":" + quote(target.string()) + "}");
     } catch (const BitException& error) {
         const bool passwordRequired = error.code() == BitFailureSource::WrongPassword;
+        const auto message = multiVolume && !passwordRequired
+            ? std::string("分卷缺失、顺序错误或损坏。") + error.what() : error.what();
         return result("{\"ok\":false,\"cancelled\":" + std::string(job->cancelled ? "true" : "false") +
-            ",\"passwordRequired\":" + (passwordRequired ? "true" : "false") + ",\"error\":" + quote(error.what()) + "}");
+            ",\"passwordRequired\":" + (passwordRequired ? "true" : "false") + ",\"volumeError\":" + (multiVolume ? "true" : "false") + ",\"error\":" + quote(message) + "}");
     } catch (const std::exception& error) {
         return result("{\"ok\":false,\"cancelled\":" + std::string(job->cancelled ? "true" : "false") +
-            ",\"error\":" + quote(error.what()) + "}");
+            ",\"volumeError\":" + (multiVolume ? "true" : "false") + ",\"error\":" + quote(error.what()) + "}");
     } catch (...) {
         return result("{\"ok\":false,\"error\":\"原生压缩引擎发生未知错误\"}");
     }
@@ -523,7 +611,7 @@ static char* mutateArchive(
         ArchiveLock lock(target.c_str());
         if (access(target.c_str(), W_OK) != 0) throw std::runtime_error("压缩包为只读，编辑文件已保留");
         const std::string expected(expectedVersion);
-        if (expected.empty() || archiveVersion(archive) != expected) {
+        if (expected.empty() || (archiveVersion(archive) != expected && volumeVersion(archive) != expected)) {
             throw std::runtime_error("原压缩包已被其他操作修改，已保留编辑文件，请重新核对后合并");
         }
         Bit7zLibrary library(engine);
@@ -536,6 +624,7 @@ static char* mutateArchive(
         {
             BitArchiveReader reader(library, archive, BitFormat::Auto, password);
             sevenZip = reader.detectedFormat() == BitFormat::SevenZip;
+            if (reader.isMultiVolume()) throw std::runtime_error("分卷压缩包暂不支持包内修改，请先解压");
             if (!sevenZip && reader.detectedFormat() != BitFormat::Zip) {
                 throw std::runtime_error("当前支持 ZIP 和 7z 的编辑回写");
             }

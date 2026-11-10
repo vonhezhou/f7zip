@@ -9,6 +9,7 @@ public:
     ZipEncodingScope(const char* engine, const char* archive, uint32_t requested);
     ~ZipEncodingScope();
     uint32_t codePage() const { return selected; }
+    void detectArchive(const char* archive);
     ZipEncodingScope(const ZipEncodingScope&) = delete;
     ZipEncodingScope& operator=(const ZipEncodingScope&) = delete;
 private:

@@ -180,11 +180,13 @@ class ArchiveFailure implements Exception {
     this.message, {
     this.cancelled = false,
     this.passwordRequired = false,
+    this.volumeError = false,
     this.conflicts = const [],
   });
   final String message;
   final bool cancelled;
   final bool passwordRequired;
+  final bool volumeError;
   final List<String> conflicts;
   @override
   String toString() => message;
@@ -237,6 +239,7 @@ class ArchiveEngine {
           response['error'] as String? ?? '操作失败',
           cancelled: response['cancelled'] == true,
           passwordRequired: response['passwordRequired'] == true,
+          volumeError: response['volumeError'] == true,
           conflicts: (response['conflicts'] as List? ?? []).cast<String>(),
         );
       }

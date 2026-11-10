@@ -126,3 +126,8 @@ ZipEncodingScope::~ZipEncodingScope() {
     setCodePage(previous);
     dlclose(handle);
 }
+
+void ZipEncodingScope::detectArchive(const char* archive) {
+    selected = detectZipCodePage(archive);
+    setCodePage(selected);
+}

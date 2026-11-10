@@ -6,6 +6,7 @@ F7Zip 自有代码使用 MIT。下列组件继续适用各自许可证。
 | --- | --- | --- | --- |
 | 7-Zip | 26.06 | LGPL-2.1-or-later、BSD、unRAR 限制 | https://github.com/ip7z/7zip/releases/download/26.06/7z2606-src.tar.xz |
 | bit7z | v4.0.10，提交 `0f03717920442abcdba80183534931c867feb9c0` | MPL-2.0 | https://github.com/rikyoz/bit7z/tree/0f03717920442abcdba80183534931c867feb9c0 |
+| libarchive 分卷测试样本 | 见 `test/fixtures/libarchive/README.md` 中的 Git blob 摘要 | BSD-2-Clause，许可证见同目录 `COPYING` | https://github.com/libarchive/libarchive/tree/master/libarchive/test |
 | Flutter / Dart | 以构建环境和 `pubspec.lock` 为准 | BSD-3-Clause | https://github.com/flutter/flutter |
 | desktop_drop | 以 `pubspec.lock` 为准 | MIT | https://pub.dev/packages/desktop_drop |
 | ffi / path / crypto | 以 `pubspec.lock` 为准 | BSD-3-Clause | https://pub.dev/publishers/dart.dev/packages |

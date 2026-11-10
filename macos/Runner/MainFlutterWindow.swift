@@ -148,7 +148,7 @@ class MainFlutterWindow: NSWindow {
     channel?.invokeMethod("showSettings", arguments: nil)
   }
 
-  private let associationExtensions = ["zip", "7z", "rar", "tar", "gz", "xz", "bz2", "iso", "tgz", "tbz", "tbz2", "txz", "zst", "cab", "dmg", "wim", "jar", "apk"]
+  private let associationExtensions = ["zip", "7z", "rar", "tar", "gz", "xz", "bz2", "iso", "tgz", "tbz", "tbz2", "txz", "001", "z01", "r00", "zst", "cab", "dmg", "wim", "jar", "apk"]
 
   private func associationStates() -> [[String: Any]] {
     let backups = UserDefaults.standard.dictionary(forKey: "associationBackups") as? [String: String] ?? [:]

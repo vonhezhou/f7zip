@@ -64,6 +64,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   String? _archive;
   String _password = '';
   int _archiveCodePage = 0;
+  int _volumeCount = 1;
   String _archiveVersion = '';
   String _archiveComment = '';
   bool _editable = false;
@@ -489,6 +490,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       setState(() {
         _archive = path;
         _archiveCodePage = codePage;
+        _volumeCount = result['volumes'] as int? ?? 1;
         _password = password;
         _archiveVersion = result['version'] as String;
         _archiveComment = result['comment'] as String? ?? '';
@@ -513,6 +515,12 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       return true;
     } catch (error) {
       if (!mounted) return false;
+      if (error is ArchiveFailure &&
+          error.volumeError &&
+          !error.passwordRequired) {
+        await _error(error);
+        return false;
+      }
       final retry = await _askPassword(error: '$error');
       if (retry != null && retry.isNotEmpty && mounted) {
         return _open(path, password: retry);
@@ -667,24 +675,25 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     if (!_available || paths.isEmpty) return;
     final extension = p.extension(paths.first).toLowerCase();
     if (paths.length == 1 &&
-        const [
-          '.zip',
-          '.7z',
-          '.rar',
-          '.tar',
-          '.gz',
-          '.xz',
-          '.bz2',
-          '.iso',
-          '.tgz',
-          '.tbz',
-          '.tbz2',
-          '.txz',
-          '.zst',
-          '.001',
-          '.cab',
-          '.dmg',
-        ].contains(extension)) {
+        (const [
+              '.zip',
+              '.7z',
+              '.rar',
+              '.tar',
+              '.gz',
+              '.xz',
+              '.bz2',
+              '.iso',
+              '.tgz',
+              '.tbz',
+              '.tbz2',
+              '.txz',
+              '.zst',
+              '.001',
+              '.cab',
+              '.dmg',
+            ].contains(extension) ||
+            RegExp(r'^\.(?:z\d{2,}|r\d{2,}|\d{3,})$').hasMatch(extension))) {
       await _open(paths.first);
     } else if (_archive != null && _editable) {
       await _addFiles(paths);
@@ -2346,7 +2355,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          '${_entries.where((entry) => !entry.directory).length} 个文件 · ${_size(total)}',
+                          '${_entries.where((entry) => !entry.directory).length} 个文件 · ${_size(total)}${_volumeCount > 1 ? ' · $_volumeCount 卷' : ''}',
                           style: TextStyle(
                             fontSize: 11,
                             color: AppColors.of(context).secondary,
@@ -3131,7 +3140,12 @@ class _CompressionDialogState extends State<_CompressionDialog> {
 }
 
 String _archiveStem(String path) {
-  var name = p.basename(path);
+  var name = p
+      .basename(path)
+      .replaceFirst(RegExp(r'\.[0-9]{3,}$'), '')
+      .replaceFirst(RegExp(r'\.part[0-9]+\.rar$', caseSensitive: false), '.rar')
+      .replaceFirst(RegExp(r'\.z[0-9]{2,}$', caseSensitive: false), '.zip')
+      .replaceFirst(RegExp(r'\.r[0-9]{2,}$', caseSensitive: false), '.rar');
   for (final suffix in [
     '.tar.gz',
     '.tar.bz2',

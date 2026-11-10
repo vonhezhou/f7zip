@@ -89,6 +89,8 @@ class MacOSMetadataTest(unittest.TestCase):
         volume = self.root / 'metadata.7z'
         result = execute('compress', volume, format='7z', inputs=[source], password='secret', volume_size=500)
         self.assertTrue(result['ok'], result)
+        self.assertFalse((self.root / 'mac-metadata').exists())
+        self.assertFalse((self.root / 'directory-entries').exists())
         output = self.root / 'flat-metadata'
         result = execute('extractFlat', result['path'], output, password='secret')
         self.assertTrue(result['ok'], result)

@@ -1293,8 +1293,9 @@ __attribute__((visibility("default"))) char* f7_run(
             if (password[0]) compressor.setPassword(password, sevenZip && std::string(format) != "7z-visible");
             if (std::string(format) == "zip-aes256") compressor.setFormatProperty(L"em", L"AES256");
             compressor.setVolumeSize(job->volumeSize);
-            const auto output = job->volumeSize ? staging.path / target.filename() :
+            const auto output = job->volumeSize ? staging.path / "volumes" / target.filename() :
                 staging.path / (std::string("archive.") + (tarStream ? "tar." : "") + outputFormat.extension());
+            if (job->volumeSize) localfs::create_directory(output.parent_path());
             if (tarStream) {
                 const auto tar = staging.path / "archive.tar";
                 BitFileCompressor packer(library, BitFormat::Tar);
@@ -1311,7 +1312,7 @@ __attribute__((visibility("default"))) char* f7_run(
             ArchiveLock directoryLock(localfs::canonical(target.parent_path()).c_str());
             checkCancellation(job);
             checkOutputGroup(target);
-            if (job->volumeSize) publishContents(staging.path, target.parent_path(), job);
+            if (job->volumeSize) publishContents(output.parent_path(), target.parent_path(), job);
             else publish(output, target);
             const auto first = job->volumeSize ? localfs::path(target.string() + ".001") : target;
             return result("{\"ok\":true,\"path\":" + quote(first.string()) + "}");

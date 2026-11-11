@@ -5,6 +5,7 @@ import 'package:f7zip/archive_engine.dart';
 import 'package:f7zip/main.dart';
 import 'package:f7zip/archive_tree.dart';
 import 'package:f7zip/app_theme.dart';
+import 'package:f7zip/window_chrome.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -108,172 +109,214 @@ void main() {
     expect(engine.progress(), isNull);
   });
 
-  testWidgets('欢迎页与实际打开压缩包后的文件列表正常显示', (tester) async {
-    // 使用真实桌面布局，覆盖自绘窗口控件占用的宽度。
-    const windowChannel = MethodChannel('sevenzip/window');
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      windowChannel,
-      (call) async => call.method == 'state'
-          ? {'focused': true, 'fullScreen': false}
-          : null,
-    );
-    addTearDown(() {
+  testWidgets(
+    '欢迎页与实际打开压缩包后的文件列表正常显示',
+    (tester) async {
+      // 使用真实桌面布局，覆盖自绘窗口控件占用的宽度。
+      const managerChannel = MethodChannel('window_manager');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        managerChannel,
+        (call) async => call.method == 'isFocused',
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          managerChannel,
+          null,
+        ),
+      );
+      const windowChannel = MethodChannel('sevenzip/window');
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         windowChannel,
-        null,
+        (call) async => call.method == 'state'
+            ? {'focused': true, 'fullScreen': false}
+            : null,
       );
-    });
-    await tester.runAsync(() async {
-      final font = FontLoader('.AppleSystemUIFont');
-      for (final path in [
-        '/System/Library/Fonts/SFNS.ttf',
-        '/System/Library/Fonts/STHeiti Light.ttc',
-      ]) {
-        final bytes = File(path).readAsBytesSync();
-        font.addFont(Future.value(ByteData.sublistView(bytes)));
-      }
-      await font.load();
-      // 测试进程显式注册完整中文回退字体，避免截图出现缺字。
-      await (FontLoader('PingFang SC')..addFont(
-            Future.value(
-              ByteData.sublistView(
-                File('/System/Library/Fonts/Supplemental/Arial Unicode.ttf')
-                    .readAsBytesSync(),
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          windowChannel,
+          null,
+        );
+      });
+      await tester.runAsync(() async {
+        final font = FontLoader('.AppleSystemUIFont');
+        for (final path in [
+          '/System/Library/Fonts/SFNS.ttf',
+          '/System/Library/Fonts/STHeiti Light.ttc',
+        ]) {
+          final bytes = File(path).readAsBytesSync();
+          font.addFont(Future.value(ByteData.sublistView(bytes)));
+        }
+        await font.load();
+        // 测试进程显式注册完整中文回退字体，避免截图出现缺字。
+        await (FontLoader('PingFang SC')..addFont(
+              Future.value(
+                ByteData.sublistView(
+                  File('/System/Library/Fonts/Supplemental/Arial Unicode.ttf')
+                      .readAsBytesSync(),
+                ),
               ),
-            ),
-          ))
-          .load();
-      final icons = FontLoader('MaterialIcons')
-        ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'));
-      await icons.load();
-    });
-    tester.view.physicalSize = const Size(1120, 700);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    final root = Directory.systemTemp.createTempSync('f7zip-ui-');
-    addTearDown(() => root.deleteSync(recursive: true));
-    final source = File(p.join(root.path, '欢迎使用.txt'))
-      ..writeAsStringSync('F7Zip UI smoke test');
-    final archive = p.join(root.path, '示例压缩包.zip');
-    final documents = Directory(p.join(root.path, '资料'))..createSync();
-    Directory(p.join(documents.path, '项目')).createSync();
-    Directory(p.join(documents.path, '空目录')).createSync();
-    File(p.join(documents.path, '项目', '计划.txt')).writeAsStringSync('文件树联动验证');
-    await tester.runAsync(
-      () => ArchiveEngine().run(
-        ArchiveRequest(
-          'compress',
-          archive,
-          inputs: [source.path, documents.path],
-        ),
-      ),
-    );
-    const channel = MethodChannel('sevenzip/desktop');
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(channel, (call) async {
-          if (call.method == 'loadSettings') return {'singleClickOpen': false};
-          if (call.method == 'openArchive') return [archive];
-          if (call.method == 'chooseInputs') return [source.path];
-          return null;
-        });
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, null),
-    );
-    final key = GlobalKey();
-    await tester.pumpWidget(RepaintBoundary(key: key, child: const F7ZipApp()));
-    await tester.pumpAndSettle();
-    expect(find.text('文件打包，从容有序'), findsOneWidget);
-    await tester.runAsync(() => _capture(key, '/tmp/f7zip-welcome.png'));
-    tester.view.physicalSize = const Size(860, 580);
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-    await tester.runAsync(
-      () => _capture(key, '/tmp/f7zip-welcome-compact.png'),
-    );
-    tester.view.physicalSize = const Size(1120, 700);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('打开压缩包'));
-    for (var attempt = 0; attempt < 100; attempt++) {
+            ))
+            .load();
+        final icons = FontLoader('MaterialIcons')
+          ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'));
+        await icons.load();
+      });
+      tester.view.physicalSize = const Size(1120, 700);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final root = Directory.systemTemp.createTempSync('f7zip-ui-');
+      addTearDown(() => root.deleteSync(recursive: true));
+      final source = File(p.join(root.path, '欢迎使用.txt'))
+        ..writeAsStringSync('F7Zip UI smoke test');
+      final archive = p.join(root.path, '示例压缩包.zip');
+      final documents = Directory(p.join(root.path, '资料'))..createSync();
+      Directory(p.join(documents.path, '项目')).createSync();
+      Directory(p.join(documents.path, '空目录')).createSync();
+      File(p.join(documents.path, '项目', '计划.txt')).writeAsStringSync('文件树联动验证');
       await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        () => ArchiveEngine().run(
+          ArchiveRequest(
+            'compress',
+            archive,
+            inputs: [source.path, documents.path],
+          ),
+        ),
       );
-      await tester.pump();
-      if (find.text('欢迎使用.txt').evaluate().isNotEmpty) break;
-    }
-    await tester.pumpAndSettle();
-    expect(find.text('欢迎使用.txt'), findsNWidgets(2));
-    expect(tester.takeException(), isNull);
-    await tester.runAsync(() => _capture(key, '/tmp/f7zip-browser.png'));
-    await tester.enterText(find.byType(TextField), '不存在的文件');
-    await tester.pumpAndSettle();
-    expect(find.text('未找到匹配的文件'), findsOneWidget);
-    await tester.tap(find.byTooltip('清除搜索'));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('row:欢迎使用.txt')), findsOneWidget);
-    expect(find.byTooltip('清除搜索'), findsNothing);
-    tester.view.physicalSize = const Size(860, 580);
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-    await tester.runAsync(
-      () => _capture(key, '/tmp/f7zip-browser-compact.png'),
-    );
-    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
-    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-    await tester.runAsync(() => _capture(key, '/tmp/f7zip-browser-dark.png'));
-    await tester.tap(find.byTooltip('设置'));
-    await tester.pumpAndSettle();
-    expect(find.text('保存设置'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-    await tester.runAsync(() => _capture(key, '/tmp/f7zip-settings-dark.png'));
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('新建'));
-    await tester.pumpAndSettle();
-    expect(find.text('选择保存位置'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-    await tester.runAsync(
-      () => _capture(key, '/tmp/f7zip-compression-dark.png'),
-    );
-    await tester.tap(find.text('取消'));
-    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
-    tester.view.physicalSize = const Size(1120, 700);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('欢迎使用.txt').last);
-    await tester.pump(const Duration(milliseconds: 350));
-    await tester.pumpAndSettle();
-    expect(find.text('已选 1 项'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('tree:资料')));
-    await tester.pumpAndSettle();
-    expect(find.text('示例压缩包.zip / 资料'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('expand:资料/项目')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('tree:资料/项目/计划.txt')));
-    await tester.pumpAndSettle();
-    expect(find.text('示例压缩包.zip / 资料/项目'), findsOneWidget);
-    expect(find.text('已选 1 项'), findsOneWidget);
-    await tester.runAsync(() => _capture(key, '/tmp/f7zip-tree.png'));
-    await tester.tap(find.byKey(const ValueKey('tree:资料/空目录')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('row:navigation:.')), findsNothing);
-    expect(find.byKey(const ValueKey('row:navigation:..')), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('row:navigation:..')));
-    await tester.pump(const Duration(milliseconds: 50));
-    await tester.tap(find.byKey(const ValueKey('row:navigation:..')));
-    await tester.pumpAndSettle();
-    expect(find.text('示例压缩包.zip / 资料'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('row:navigation:..')));
-    await tester.pump(const Duration(milliseconds: 50));
-    await tester.tap(find.byKey(const ValueKey('row:navigation:..')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('row:navigation:..')), findsNothing);
-    expect(find.byKey(const ValueKey('row:欢迎使用.txt')), findsOneWidget);
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox());
-  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+      const channel = MethodChannel('sevenzip/desktop');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'loadSettings') {
+              return {'singleClickOpen': false};
+            }
+            if (call.method == 'openArchive') return [archive];
+            if (call.method == 'chooseInputs') return [source.path];
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      final key = GlobalKey();
+      await tester.pumpWidget(
+        RepaintBoundary(key: key, child: const F7ZipApp()),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('文件打包，从容有序'), findsOneWidget);
+      final controlsX = tester.getCenter(find.byType(WindowControls)).dx;
+      expect(
+        controlsX,
+        windowControlsOnLeft ? lessThan(100) : greaterThan(1000),
+      );
+      await tester.runAsync(() => _capture(key, '/tmp/f7zip-welcome.png'));
+      await tester.runAsync(
+        () => _capture(
+          key,
+          '/tmp/f7zip-${defaultTargetPlatform.name}-welcome.png',
+        ),
+      );
+      tester.view.physicalSize = const Size(860, 580);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await tester.runAsync(
+        () => _capture(key, '/tmp/f7zip-welcome-compact.png'),
+      );
+      tester.view.physicalSize = const Size(1120, 700);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('打开压缩包'));
+      for (var attempt = 0; attempt < 100; attempt++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+        if (find.text('欢迎使用.txt').evaluate().isNotEmpty) break;
+      }
+      await tester.pumpAndSettle();
+      expect(find.text('欢迎使用.txt'), findsNWidgets(2));
+      expect(tester.takeException(), isNull);
+      await tester.runAsync(() => _capture(key, '/tmp/f7zip-browser.png'));
+      await tester.enterText(find.byType(TextField), '不存在的文件');
+      await tester.pumpAndSettle();
+      expect(find.text('未找到匹配的文件'), findsOneWidget);
+      await tester.tap(find.byTooltip('清除搜索'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('row:欢迎使用.txt')), findsOneWidget);
+      expect(find.byTooltip('清除搜索'), findsNothing);
+      tester.view.physicalSize = const Size(860, 580);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await tester.runAsync(
+        () => _capture(key, '/tmp/f7zip-browser-compact.png'),
+      );
+      tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+      addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await tester.runAsync(() => _capture(key, '/tmp/f7zip-browser-dark.png'));
+      await tester.runAsync(
+        () => _capture(
+          key,
+          '/tmp/f7zip-${defaultTargetPlatform.name}-browser-dark.png',
+        ),
+      );
+      await tester.tap(find.byTooltip('设置'));
+      await tester.pumpAndSettle();
+      expect(find.text('保存设置'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.runAsync(
+        () => _capture(key, '/tmp/f7zip-settings-dark.png'),
+      );
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('新建'));
+      await tester.pumpAndSettle();
+      expect(find.text('选择保存位置'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.runAsync(
+        () => _capture(key, '/tmp/f7zip-compression-dark.png'),
+      );
+      await tester.tap(find.text('取消'));
+      tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+      tester.view.physicalSize = const Size(1120, 700);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('欢迎使用.txt').last);
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      expect(find.text('已选 1 项'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('tree:资料')));
+      await tester.pumpAndSettle();
+      expect(find.text('示例压缩包.zip / 资料'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('expand:资料/项目')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('tree:资料/项目/计划.txt')));
+      await tester.pumpAndSettle();
+      expect(find.text('示例压缩包.zip / 资料/项目'), findsOneWidget);
+      expect(find.text('已选 1 项'), findsOneWidget);
+      await tester.runAsync(() => _capture(key, '/tmp/f7zip-tree.png'));
+      await tester.tap(find.byKey(const ValueKey('tree:资料/空目录')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('row:navigation:.')), findsNothing);
+      expect(find.byKey(const ValueKey('row:navigation:..')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('row:navigation:..')));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(find.byKey(const ValueKey('row:navigation:..')));
+      await tester.pumpAndSettle();
+      expect(find.text('示例压缩包.zip / 资料'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('row:navigation:..')));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(find.byKey(const ValueKey('row:navigation:..')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('row:navigation:..')), findsNothing);
+      expect(find.byKey(const ValueKey('row:欢迎使用.txt')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: TargetPlatformVariant({
+      TargetPlatform.macOS,
+      TargetPlatform.windows,
+      TargetPlatform.linux,
+    }),
+  );
   testWidgets('主题设置持久化、原生外观同步和系统切换保留当前文件选择', (tester) async {
     tester.view.physicalSize = const Size(1120, 740);
     tester.view.devicePixelRatio = 1;

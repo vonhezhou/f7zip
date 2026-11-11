@@ -26,8 +26,9 @@ import 'password_recovery_dialog.dart';
 
 const _desktop = MethodChannel('sevenzip/desktop');
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await initializeDesktopWindow();
   runApp(const F7ZipApp());
 }
 
@@ -3333,7 +3334,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
 
   Widget _toolbar() => Container(
     height: 52,
-    padding: const EdgeInsets.only(right: 8),
+    padding: EdgeInsets.only(right: windowControlsOnRight ? 0 : 8),
     decoration: BoxDecoration(
       color: AppColors.of(context).canvas,
       border: Border(bottom: BorderSide(color: AppColors.of(context).border)),
@@ -3350,7 +3351,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           ),
         Row(
           children: [
-            const WindowControls(),
+            if (windowControlsOnLeft) const WindowControls(),
             IconButton(
               tooltip: _showTree ? '隐藏侧栏' : '显示侧栏',
               onPressed: _archive == null
@@ -3626,6 +3627,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
                 ),
               ],
             ),
+            if (windowControlsOnRight) const WindowControls(),
           ],
         ),
       ],

@@ -6,6 +6,7 @@ import 'custom_theme_controls.dart';
 import 'filename_encoding.dart';
 import 'filename_normalization.dart';
 import 'compression_preset.dart';
+import 'compression_dialog.dart';
 import 'password_manager.dart';
 
 const _desktop = MethodChannel('sevenzip/desktop');
@@ -173,6 +174,9 @@ class SettingsDialog extends StatefulWidget {
 }
 
 class _SettingsDialogState extends State<SettingsDialog> {
+  late final List<CompressionPreset> _compressionPresets = List.of(
+    widget.initial.compressionPresets,
+  );
   late String _defaultCompressionPreset =
       widget.initial.defaultCompressionPreset;
   late ThemeMode _themeMode = widget.initial.themeMode;
@@ -265,9 +269,40 @@ class _SettingsDialogState extends State<SettingsDialog> {
     if (path != null && mounted) controller.text = path;
   }
 
+  Future<void> _editCompressionPreset([CompressionPreset? initial]) async {
+    final preset = await showDialog<CompressionPreset>(
+      context: context,
+      builder: (_) => CompressionDialog.preset(
+        presets: _compressionPresets,
+        initialPreset: initial,
+      ),
+    );
+    if (preset == null || !mounted) return;
+    setState(() {
+      if (initial == null) {
+        _compressionPresets.add(preset);
+      } else {
+        final index = _compressionPresets.indexOf(initial);
+        _compressionPresets[index] = preset;
+        if (_defaultCompressionPreset == initial.name) {
+          _defaultCompressionPreset = preset.name;
+        }
+      }
+    });
+  }
+
+  void _deleteCompressionPreset(CompressionPreset preset) {
+    setState(() {
+      _compressionPresets.remove(preset);
+      if (_defaultCompressionPreset == preset.name) {
+        _defaultCompressionPreset = '';
+      }
+    });
+  }
+
   Future<void> _save() async {
     final settings = AppSettings(
-      compressionPresets: widget.initial.compressionPresets,
+      compressionPresets: List.unmodifiable(_compressionPresets),
       defaultCompressionPreset: _defaultCompressionPreset,
       themeMode: _themeMode,
       colorTheme: _colorTheme,
@@ -473,45 +508,108 @@ class _SettingsDialogState extends State<SettingsDialog> {
                           key: const PageStorageKey('settingsCompression'),
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           children: [
-                            DropdownButtonFormField<String>(
-                              key: const ValueKey('defaultCompressionPreset'),
-                              initialValue: _defaultCompressionPreset,
-                              isExpanded: true,
-                              decoration: const InputDecoration(
-                                labelText: '默认压缩预设',
-                              ),
-                              items: [
-                                const DropdownMenuItem(
-                                  value: '',
-                                  child: Text('使用标准设置'),
+                            KeyedSubtree(
+                              key: ValueKey(_defaultCompressionPreset),
+                              child: DropdownButtonFormField<String>(
+                                key: const ValueKey('defaultCompressionPreset'),
+                                initialValue: _defaultCompressionPreset,
+                                isExpanded: true,
+                                decoration: const InputDecoration(
+                                  labelText: '默认压缩预设',
                                 ),
-                                for (final preset
-                                    in widget.initial.compressionPresets)
-                                  DropdownMenuItem(
-                                    value: preset.name,
-                                    child: Text(
-                                      preset.name,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
+                                items: [
+                                  const DropdownMenuItem(
+                                    value: '',
+                                    child: Text('使用标准设置'),
                                   ),
-                              ],
-                              onChanged: (value) => setState(
-                                () => _defaultCompressionPreset = value!,
+                                  for (final preset in _compressionPresets)
+                                    DropdownMenuItem(
+                                      value: preset.name,
+                                      child: Text(
+                                        preset.name,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                ],
+                                onChanged: _saving
+                                    ? null
+                                    : (value) => setState(
+                                        () =>
+                                            _defaultCompressionPreset = value!,
+                                      ),
                               ),
                             ),
                             const SizedBox(height: 12),
                             const Text(
-                              '在“新建压缩包”中保存、更新和删除预设。默认预设用于主窗口与 Finder 的配置压缩入口。密码按每次任务输入。',
+                              '默认预设用于主窗口与 Finder 的配置压缩入口。密码按每次任务输入。预设修改在保存设置后生效。',
                             ),
                             const SizedBox(height: 8),
-                            for (final preset
-                                in widget.initial.compressionPresets)
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: TextButton.icon(
+                                key: const ValueKey('newCompressionPreset'),
+                                onPressed: _saving
+                                    ? null
+                                    : () => _editCompressionPreset(),
+                                icon: const Icon(Icons.add),
+                                label: const Text('新建预设'),
+                              ),
+                            ),
+                            if (_compressionPresets.isEmpty)
+                              const Text('暂无压缩预设'),
+                            for (final preset in _compressionPresets)
                               ListTile(
+                                key: ValueKey('settingsPreset:${preset.name}'),
                                 dense: true,
                                 contentPadding: EdgeInsets.zero,
                                 title: Text(preset.name),
                                 subtitle: Text(
                                   '${preset.format.toUpperCase()} · 等级 ${preset.level} · ${preset.volumeSize == 0 ? '不分卷' : '${preset.volumeSize ~/ 1048576} MiB / 卷'}',
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      key: ValueKey(
+                                        'defaultPreset:${preset.name}',
+                                      ),
+                                      tooltip: '设为默认预设',
+                                      onPressed: _saving
+                                          ? null
+                                          : () => setState(
+                                              () => _defaultCompressionPreset =
+                                                  preset.name,
+                                            ),
+                                      icon: Icon(
+                                        _defaultCompressionPreset == preset.name
+                                            ? Icons.star
+                                            : Icons.star_border,
+                                      ),
+                                    ),
+                                    IconButton(
+                                      key: ValueKey(
+                                        'editPreset:${preset.name}',
+                                      ),
+                                      tooltip: '编辑预设',
+                                      onPressed: _saving
+                                          ? null
+                                          : () =>
+                                                _editCompressionPreset(preset),
+                                      icon: const Icon(Icons.edit_outlined),
+                                    ),
+                                    IconButton(
+                                      key: ValueKey(
+                                        'deletePreset:${preset.name}',
+                                      ),
+                                      tooltip: '删除预设',
+                                      onPressed: _saving
+                                          ? null
+                                          : () => _deleteCompressionPreset(
+                                              preset,
+                                            ),
+                                      icon: const Icon(Icons.delete_outline),
+                                    ),
+                                  ],
                                 ),
                               ),
                           ],

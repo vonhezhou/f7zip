@@ -209,6 +209,10 @@ class MainFlutterWindow: NSWindow {
         result(nil)
       case "recentArchives":
         result(UserDefaults.standard.stringArray(forKey: "recentArchives") ?? [])
+      case "clearRecentArchives":
+        UserDefaults.standard.removeObject(forKey: "recentArchives")
+        self.archiveMenu?.updateRecent([])
+        result(nil)
       case "rememberArchive":
         if let path = call.arguments as? String {
           var paths = UserDefaults.standard.stringArray(forKey: "recentArchives") ?? []
@@ -601,6 +605,8 @@ private class ArchiveMenuTarget: NSObject, NSMenuItemValidation {
       item.toolTip = path
       recent.addItem(item)
     }
+    if !paths.isEmpty { recent.addItem(.separator()) }
+    recent.addItem(item("清空最近打开", "clearRecent"))
   }
 
   @objc private func performCommand(_ sender: NSMenuItem) {

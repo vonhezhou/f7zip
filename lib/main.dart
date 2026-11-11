@@ -2209,6 +2209,23 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     _desktop.invokeMethod<void>('setArchiveTitle', '');
   }
 
+  Future<void> _clearRecentArchives() async {
+    if (!_interactive || _recent.isEmpty) return;
+    setState(() => _choosing = true);
+    try {
+      await _desktop.invokeMethod<void>('clearRecentArchives');
+      if (!mounted) return;
+      setState(() {
+        _recent.clear();
+        _status = '已清空最近打开记录';
+      });
+    } catch (error) {
+      if (mounted) await _error(error);
+    } finally {
+      if (mounted) setState(() => _choosing = false);
+    }
+  }
+
   Future<void> _command(String command) async {
     if (command == 'tasks') {
       setState(() => _showTasks = !_showTasks);
@@ -2220,6 +2237,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     }
     if (!_interactive || _activeQueuedTask != null) return;
     switch (command) {
+      case 'clearRecent':
+        await _clearRecentArchives();
+        break;
       case 'open':
         await _openDialog();
         break;
@@ -3145,6 +3165,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       'batchExtract': _desktopReady && !_choosing,
       'batchTest': _desktopReady && !_choosing,
       'open': _interactive,
+      'clearRecent': _interactive && _recent.isNotEmpty,
       'new': _interactive,
       'extract': _interactive && archive != null,
       'test': _interactive && archive != null,
@@ -3437,22 +3458,30 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               tooltip: '最近打开',
               enabled: _interactive && _recent.isNotEmpty,
               icon: const Icon(Icons.history_rounded, size: 19),
-              onSelected: _open,
-              itemBuilder: (_) => _recent
-                  .map(
-                    (path) => PopupMenuItem(
-                      value: path,
-                      child: Tooltip(
-                        message: path,
-                        child: Text(
-                          p.basename(path),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
+              onSelected: (path) async {
+                if (path.isEmpty) {
+                  await _clearRecentArchives();
+                } else {
+                  await _open(path);
+                }
+              },
+              itemBuilder: (_) => [
+                ..._recent.map(
+                  (path) => PopupMenuItem<String>(
+                    value: path,
+                    child: Tooltip(
+                      message: path,
+                      child: Text(
+                        p.basename(path),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                  )
-                  .toList(),
+                  ),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem<String>(value: '', child: Text('清空最近打开')),
+              ],
             ),
             IconButton(
               tooltip: '任务队列',
@@ -3718,13 +3747,30 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         if (_archive == null)
           Padding(
             padding: const EdgeInsets.only(left: 10, bottom: 6),
-            child: Text(
-              _archive == null ? '最近打开' : '压缩包文件树',
-              style: TextStyle(
-                fontSize: 11,
-                color: AppColors.of(context).secondary,
-                fontWeight: FontWeight.w600,
-              ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '最近打开',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: AppColors.of(context).secondary,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                if (_recent.isNotEmpty)
+                  IconButton(
+                    tooltip: '清空最近打开',
+                    constraints: const BoxConstraints.tightFor(
+                      width: 28,
+                      height: 24,
+                    ),
+                    padding: EdgeInsets.zero,
+                    onPressed: _interactive ? _clearRecentArchives : null,
+                    icon: const Icon(Icons.delete_sweep_outlined, size: 16),
+                  ),
+              ],
             ),
           ),
         if (_archive == null && _recent.isEmpty)

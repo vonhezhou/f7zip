@@ -33,6 +33,7 @@ open dist/F7Zip.app
 
 ## 已实现
 
+- 侧栏和工具栏的“最近打开”、原生“文件 → 最近打开”菜单支持一键清空历史记录，重启后保持清空状态。
 - 在新建压缩包中保存、更新、删除及复用压缩预设，记录格式、等级、分卷大小和加密选项。“设置 → 压缩”选择默认预设，主窗口与 Finder 配置压缩入口自动应用，密码按每次任务输入。
 - 创建 ZIP / 7z / TAR / TAR.GZ / TAR.BZ2 / TAR.XZ / GZIP / XZ / BZIP2，选择压缩等级。ZIP / 7z 可设置密码。GZIP / XZ / BZIP2 输入为单个普通文件，TAR 仅打包。ZIP 支持 AES-256（默认）或 ZipCrypto，7z 可选择是否加密文件名。
 - 新建压缩包的“高级压缩参数”按格式提供算法、字典、固实块和线程上限，随压缩预设保存并用于 Finder 配置入口。ZIP 可选 Copy / Deflate / Deflate64 / BZip2 / LZMA / PPMd，7z 可选 Copy / LZMA2 / LZMA / PPMd / BZip2。LZMA、LZMA2 和 PPMd 可设置 1–256 MiB 字典，7z 可关闭固实压缩或设置 16 / 64 / 256 / 1024 MiB 固实块。默认沿用原有参数及关闭固实压缩，TAR 仅打包，GZIP 固定 Deflate，XZ 固定 LZMA2，BZIP2 固定 BZip2。线程上限 1–64 或自动，实际并行度由算法和输入决定，GZIP 和 TAR 隐藏线程选项。显示本机逻辑处理器数量和每个编码器的内存粗估，多个编码器会增加总内存，实际字典可能按输入大小缩小。

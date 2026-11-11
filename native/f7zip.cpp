@@ -1904,6 +1904,11 @@ __attribute__((visibility("default"))) char* f7_run(
             compressionParameters(compressor, outputFormat, level, job);
             if (password[0]) compressor.setPassword(password, sevenZip && std::string(format) != "7z-visible" && std::string(format) != "sfx-visible");
             if (std::string(format) == "zip-aes256" || std::string(format) == "zipx-aes256") compressor.setFormatProperty(L"em", L"AES256");
+            // 新建 ZIP 明确使用 Unicode，避免编码策略受主机代码页影响。
+            if (outputFormat == BitFormat::Zip) {
+                compressor.setFormatProperty(L"cu", true);
+                compressor.setFormatProperty(L"cp", uint32_t(65001));
+            }
             compressor.setVolumeSize(job->volumeSize);
             auto output = job->volumeSize ? staging.path / "volumes" / target.filename() :
                 staging.path / (std::string("archive.") + (tarStream ? "tar." : "") + outputFormat.extension());

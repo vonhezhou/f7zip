@@ -816,6 +816,43 @@ class NativeEngineTest(unittest.TestCase):
             self.assertFalse(archive.exists())
         self.assert_no_staging()
 
+    def test_created_zip_uses_utf8_names_independent_of_reading_code_page(self):
+        names = ['ASCII.txt', '简体中文.txt', '繁體中文.txt', '資料日本語.txt', '한글.txt',
+                 'résumé.txt', 'emoji-😀.txt', '目录/子目录/cafe\u0301.txt']
+        folder = self.root / 'payload'
+        folder.mkdir()
+        for name in names:
+            source = folder / name
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(('content:' + name).encode())
+        # 打开旧 ZIP 的设置不应改变创建策略。
+        for format, password in [('zip', ''), ('zip', 'secret'), ('zip-aes256', 'secret'), ('zipx', '')]:
+            with self.subTest(format=format, password=bool(password)):
+                archive = self.root / f'{format}-{bool(password)}.zip'
+                response = execute('compress', archive, inputs=[folder], format=format,
+                                   password=password, code_page=936)
+                self.assertTrue(response['ok'], response)
+                with zipfile.ZipFile(archive) as reader, archive.open('rb') as raw:
+                    for name in names:
+                        path = 'payload/' + name
+                        info = reader.getinfo(path)
+                        non_ascii = not path.isascii()
+                        self.assertEqual(bool(info.flag_bits & 0x800), non_ascii)
+                        raw.seek(info.header_offset)
+                        header = raw.read(30)
+                        flags, = struct.unpack_from('<H', header, 6)
+                        length, = struct.unpack_from('<H', header, 26)
+                        self.assertEqual(bool(flags & 0x800), non_ascii)
+                        self.assertEqual(raw.read(length), path.encode('utf-8'))
+                        if format == 'zip':
+                            self.assertEqual(reader.read(path, pwd=password.encode() or None),
+                                             ('content:' + name).encode())
+                target = self.root / f'extracted-{format}-{bool(password)}'
+                extracted = execute('extract', archive, target, password=password, code_page=932)
+                self.assertTrue(extracted['ok'], extracted)
+                for name in names:
+                    self.assertEqual((target / 'payload' / name).read_bytes(), ('content:' + name).encode())
+
     def legacy_zip(self, name, encoding, names):
         class LegacyInfo(zipfile.ZipInfo):
             def _encodeFilenameFlags(self):
@@ -830,6 +867,7 @@ class NativeEngineTest(unittest.TestCase):
     def test_legacy_zip_auto_detection_manual_selection_and_extraction(self):
         cases = [
             ('gb18030', 54936, ['中文目录/测试文档你好世界.txt', '中文目录/另一份文件.txt']),
+            ('cp936', 936, ['简体中文/测试文档你好世界.txt', '简体中文/另一份文件.txt']),
             ('cp932', 932, ['日本語フォルダ/資料ファイルこんにちは.txt', '日本語フォルダ/報告書.txt']),
             ('big5', 950, ['繁體中文/資料測試檔案.txt']),
             ('cp1252', 1252, ['résumé/café.txt']),
@@ -842,7 +880,7 @@ class NativeEngineTest(unittest.TestCase):
                 for requested in [0, code_page]:
                     listing = execute('list', archive, code_page=requested)
                     self.assertTrue(listing['ok'], listing)
-                    self.assertEqual(listing['codePage'], code_page)
+                    self.assertEqual(listing['codePage'], 54936 if encoding == 'cp936' and requested == 0 else code_page)
                     self.assertEqual({item['path'] for item in listing['items']}, set(names + ['UTF8-中文.txt']))
                     target = self.root / f'output-{encoding}-{requested}'
                     response = execute('extract', archive, target, code_page=requested)

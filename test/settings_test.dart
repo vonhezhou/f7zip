@@ -25,6 +25,10 @@ void main() {
     expect(defaults.removeRedundantRoot, isFalse);
     expect(defaults.filenameEncoding, FilenameEncoding.autoDetect);
     expect(
+      AppSettings.fromJson({'filenameEncoding': 'gbk'}).filenameEncoding,
+      FilenameEncoding.gbk,
+    );
+    expect(
       AppSettings.fromJson({'filenameEncoding': 'invalid'}).filenameEncoding,
       FilenameEncoding.autoDetect,
     );

@@ -5008,6 +5008,18 @@ class _CompressionDialogState extends State<_CompressionDialog> {
               ],
             ),
             const SizedBox(height: 12),
+            if (const {'zip', 'zipx'}.contains(_format)) ...[
+              const Text(
+                '文件名编码 · UTF-8（跨平台）',
+                key: ValueKey('zipCreationEncoding'),
+              ),
+              const SizedBox(height: 4),
+              const Text(
+                '写入 UTF-8 标志，供 Windows、macOS 和 Linux 识别。接收方需使用支持 UTF-8 的解压软件。',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+            ],
             if (_supportsVolumes) ...[
               KeyedSubtree(
                 key: ValueKey('presetVolume:$_presetRevision'),

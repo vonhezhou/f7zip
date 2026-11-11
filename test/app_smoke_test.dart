@@ -343,6 +343,8 @@ void main() {
     Future<void> chooseTheme(String label, {AppColorTheme? colorTheme}) async {
       await tester.tap(find.byTooltip('设置'));
       await tester.pumpAndSettle();
+      await tester.tap(find.text('主题'));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('themeMode')));
       await tester.pumpAndSettle();
       await tester.tap(find.text(label).last);
@@ -366,6 +368,8 @@ void main() {
       ).colorScheme,
     );
     await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('主题'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('colorTheme:blue')));
     await tester.pumpAndSettle();

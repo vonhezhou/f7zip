@@ -206,107 +206,247 @@ class _ThemeEditorState extends State<_ThemeEditor> {
   late final _name = TextEditingController(text: widget.initial.name);
   late final _color = TextEditingController(text: widget.initial.hexColor);
 
+  static const _picker = MethodChannel('sevenzip/themeColor');
+  bool _picking = false;
+  String? _pickerError;
+
+  @override
+  void initState() {
+    super.initState();
+    _picker.setMethodCallHandler((call) async {
+      if (call.method == 'colorChanged' &&
+          _picking &&
+          mounted &&
+          call.arguments is int) {
+        _setColor(Color(call.arguments as int));
+      }
+    });
+  }
+
+  void _setColor(Color color) => setState(() {
+    _color.text = CustomColorTheme(name: '', seedColor: color).hexColor;
+  });
+
+  Future<void> _chooseColor() async {
+    final previous = _color.text;
+    setState(() {
+      _picking = true;
+      _pickerError = null;
+    });
+    try {
+      final color = await _picker.invokeMethod<int>(
+        'chooseColor',
+        (_seed ?? widget.initial.seedColor).toARGB32(),
+      );
+      if (!mounted) return;
+      if (color == null) {
+        setState(() => _color.text = previous);
+      } else {
+        _setColor(Color(color));
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _color.text = previous;
+          _pickerError = '无法打开调色盘 · $error';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _picking = false);
+      }
+    }
+  }
+
   Color? get _seed => RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(_color.text)
       ? Color(0xFF000000 | int.parse(_color.text.substring(1), radix: 16))
       : null;
 
   @override
   void dispose() {
+    _picker.setMethodCallHandler(null);
     _name.dispose();
     _color.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('自定义主题'),
-    content: SizedBox(
-      width: 380,
-      child: SingleChildScrollView(
-        child: Form(
-          key: _form,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              TextFormField(
-                key: const ValueKey('customThemeName'),
-                controller: _name,
-                autofocus: true,
-                maxLength: 80,
-                decoration: const InputDecoration(labelText: '主题名称'),
-                validator: (value) {
-                  final name = value?.trim() ?? '';
-                  if (name.isEmpty) return '请输入主题名称';
-                  if (widget.existingNames.contains(name)) return '主题名称已存在';
-                  return null;
-                },
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                key: const ValueKey('customThemeColor'),
-                controller: _color,
-                decoration: const InputDecoration(
-                  labelText: '种子色',
-                  hintText: '#6750A4',
+  Widget build(BuildContext context) => PopScope(
+    canPop: !_picking,
+    child: AlertDialog(
+      title: const Text('自定义主题'),
+      content: SizedBox(
+        width: 560,
+        child: SingleChildScrollView(
+          child: Form(
+            key: _form,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextFormField(
+                  key: const ValueKey('customThemeName'),
+                  controller: _name,
+                  autofocus: true,
+                  maxLength: 80,
+                  decoration: const InputDecoration(labelText: '主题名称'),
+                  validator: (value) {
+                    final name = value?.trim() ?? '';
+                    if (name.isEmpty) return '请输入主题名称';
+                    if (widget.existingNames.contains(name)) return '主题名称已存在';
+                    return null;
+                  },
                 ),
-                onChanged: (_) => setState(() {}),
-                validator: (_) => _seed == null ? '请输入 #RRGGBB 格式的颜色' : null,
-              ),
-              const SizedBox(height: 16),
-              for (final brightness in Brightness.values)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: Theme(
-                    data: buildAppTheme(
-                      brightness,
-                      customTheme: CustomColorTheme(
-                        name: '',
-                        seedColor: _seed ?? widget.initial.seedColor,
-                      ),
-                    ),
-                    child: Builder(
-                      builder: (context) => Material(
-                        color: Theme.of(context).colorScheme.surface,
-                        borderRadius: BorderRadius.circular(8),
-                        child: ListTile(
-                          leading: Icon(
-                            Icons.folder,
-                            color: Theme.of(context).colorScheme.tertiary,
-                          ),
-                          title: Text(
-                            brightness == Brightness.light ? '浅色预览' : '深色预览',
-                          ),
-                          trailing: FilledButton(
-                            onPressed: () {},
-                            child: const Text('按钮'),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        key: const ValueKey('customThemeColor'),
+                        controller: _color,
+                        enabled: !_picking,
+                        decoration: InputDecoration(
+                          labelText: '种子色',
+                          hintText: '#6750A4',
+                          prefixIcon: Padding(
+                            padding: const EdgeInsets.all(10),
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: _seed ?? widget.initial.seedColor,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
                           ),
                         ),
+                        onChanged: (_) => setState(() {}),
+                        validator: (_) =>
+                            _seed == null ? '请输入 #RRGGBB 格式的颜色' : null,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    OutlinedButton.icon(
+                      key: const ValueKey('themeColorPicker'),
+                      onPressed: _picking ? null : _chooseColor,
+                      icon: const Icon(Icons.palette_outlined),
+                      label: const Text('调色盘…'),
+                    ),
+                  ],
+                ),
+                if (_pickerError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      _pickerError!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
                       ),
                     ),
                   ),
+                const SizedBox(height: 16),
+                LayoutBuilder(
+                  builder: (context, constraints) => Wrap(
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: [
+                      for (final brightness in Brightness.values)
+                        SizedBox(
+                          width: constraints.maxWidth >= 480
+                              ? (constraints.maxWidth - 12) / 2
+                              : constraints.maxWidth,
+                          child: _ThemePreview(
+                            brightness: brightness,
+                            seedColor: _seed ?? widget.initial.seedColor,
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
+      actions: [
+        TextButton(
+          onPressed: _picking ? null : () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: _picking
+              ? null
+              : () {
+                  if (_form.currentState!.validate()) {
+                    Navigator.pop(
+                      context,
+                      CustomColorTheme(
+                        name: _name.text.trim(),
+                        seedColor: _seed!,
+                      ),
+                    );
+                  }
+                },
+          child: const Text('保存主题'),
+        ),
+      ],
     ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('取消'),
-      ),
-      FilledButton(
-        onPressed: () {
-          if (_form.currentState!.validate()) {
-            Navigator.pop(
-              context,
-              CustomColorTheme(name: _name.text.trim(), seedColor: _seed!),
-            );
-          }
-        },
-        child: const Text('保存主题'),
-      ),
-    ],
+  );
+}
+
+class _ThemePreview extends StatelessWidget {
+  const _ThemePreview({required this.brightness, required this.seedColor});
+  final Brightness brightness;
+  final Color seedColor;
+
+  @override
+  Widget build(BuildContext context) => Theme(
+    data: buildAppTheme(
+      brightness,
+      customTheme: CustomColorTheme(name: '', seedColor: seedColor),
+    ),
+    child: Builder(
+      builder: (context) {
+        final colors = AppColors.of(context);
+        return Material(
+          key: ValueKey('themePreview:${brightness.name}'),
+          color: colors.canvas,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+            side: BorderSide(color: colors.border),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            children: [
+              Container(
+                color: colors.panel,
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        brightness == Brightness.light ? '浅色预览' : '深色预览',
+                      ),
+                    ),
+                    FilledButton(onPressed: () {}, child: const Text('解压')),
+                  ],
+                ),
+              ),
+              ListTile(
+                leading: Icon(Icons.folder, color: colors.folder),
+                title: const Text('项目资料'),
+                subtitle: const Text('文件夹'),
+              ),
+              ListTile(
+                selected: true,
+                selectedTileColor: colors.selection,
+                selectedColor: colors.onSelection,
+                leading: const Icon(Icons.description_outlined),
+                title: const Text('说明.txt'),
+                trailing: const Text('12 KB'),
+              ),
+            ],
+          ),
+        );
+      },
+    ),
   );
 }

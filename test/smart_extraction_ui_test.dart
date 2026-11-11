@@ -122,6 +122,8 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('设置'));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('解压'));
+    await tester.pumpAndSettle();
     final toggle = find.byKey(const ValueKey('smartExtraction'));
     await tester.ensureVisible(toggle);
     await tester.pumpAndSettle();
@@ -134,6 +136,8 @@ void main() {
     await tester.pumpWidget(const F7ZipApp());
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('解压'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(toggle);
     await tester.pumpAndSettle();
@@ -232,6 +236,8 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('设置'));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('解压'));
+    await tester.pumpAndSettle();
     final toggle = find.byKey(const ValueKey('autoUnpackTar'));
     await tester.ensureVisible(toggle);
     await tester.pumpAndSettle();
@@ -244,6 +250,8 @@ void main() {
     await tester.pumpWidget(const F7ZipApp());
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('解压'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(toggle);
     await tester.pumpAndSettle();

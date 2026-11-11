@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -206,6 +207,79 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('原生调色盘实时更新浅深预览，取消恢复原色，确认保存选色', (tester) async {
+    const picker = MethodChannel('sevenzip/themeColor');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (_) async => null);
+    Completer<int?>? pending;
+    messenger.setMockMethodCallHandler(picker, (call) async {
+      expect(call.method, 'chooseColor');
+      expect(call.arguments, 0xFF6750A4);
+      pending = Completer<int?>();
+      return pending!.future;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(picker, null));
+    await tester.pumpWidget(
+      const MaterialApp(home: SettingsDialog(initial: AppSettings())),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('主题'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('自定义主题…'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('customThemeName')),
+      '调色盘主题',
+    );
+    String hex() => tester
+        .widget<TextFormField>(find.byKey(const ValueKey('customThemeColor')))
+        .controller!
+        .text;
+    await tester.tap(find.byKey(const ValueKey('themeColorPicker')));
+    await tester.pumpAndSettle();
+    const codec = StandardMethodCodec();
+    final message = Completer<void>();
+    unawaited(
+      messenger.handlePlatformMessage(
+        'sevenzip/themeColor',
+        codec.encodeMethodCall(const MethodCall('colorChanged', 0xFF123456)),
+        (_) => message.complete(),
+      ),
+    );
+    await message.future;
+    await tester.pumpAndSettle();
+    expect(hex(), '#123456');
+    for (final brightness in Brightness.values) {
+      final preview = find.byKey(ValueKey('themePreview:${brightness.name}'));
+      expect(
+        Theme.of(tester.element(preview)).colorScheme,
+        ColorScheme.fromSeed(
+          seedColor: const Color(0xFF123456),
+          brightness: brightness,
+        ),
+      );
+    }
+    expect(
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, '保存主题'))
+          .onPressed,
+      isNull,
+    );
+    pending!.complete(null);
+    await tester.pumpAndSettle();
+    expect(hex(), '#6750A4');
+    await tester.tap(find.byKey(const ValueKey('themeColorPicker')));
+    await tester.pumpAndSettle();
+    pending!.complete(0xFF112233);
+    await tester.pumpAndSettle();
+    expect(hex(), '#112233');
+    await tester.tap(find.text('保存主题'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('customTheme:调色盘主题')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('主题导入导出真实文件、同名保留、错误和取消保护设置', (tester) async {
     tester.view.physicalSize = const Size(1200, 900);
     tester.view.devicePixelRatio = 1;
@@ -231,6 +305,8 @@ void main() {
     await tester.pumpWidget(
       const MaterialApp(home: SettingsDialog(initial: AppSettings())),
     );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('主题'));
     await tester.pumpAndSettle();
     Future<void> transfer(String label) async {
       await tester.ensureVisible(find.text(label));
@@ -347,9 +423,13 @@ void main() {
     );
     await tester.tap(find.text('打开设置'));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('解压'));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('filenameEncoding')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('日文 Shift-JIS').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('主题'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('colorTheme:green')));
     await tester.pumpAndSettle();
@@ -364,6 +444,8 @@ void main() {
       Theme.of(tester.element(find.byType(Scaffold))).colorScheme,
       buildAppTheme(Brightness.light).colorScheme,
     );
+    await tester.tap(find.text('常规'));
+    await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
       find.text('单击打开文件和文件夹'),
       100,
@@ -384,7 +466,16 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('显示返回上一级目录项（..）'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('解压时删除冗余的根目录'));
+    await tester.tap(find.text('解压'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('解压时删除冗余的根目录'),
+      100,
+      scrollable: find.descendant(
+        of: find.byKey(const PageStorageKey('settingsExtraction')),
+        matching: find.byType(Scrollable),
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('解压时删除冗余的根目录'));
     await tester.pumpAndSettle();
@@ -419,6 +510,8 @@ void main() {
 }
 
 Future<void> _revealSetting(WidgetTester tester, String label) async {
+  await tester.tap(find.text('主题'));
+  await tester.pumpAndSettle();
   await tester.scrollUntilVisible(
     find.text(label),
     100,

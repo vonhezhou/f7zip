@@ -317,7 +317,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       ),
       child: Builder(
         builder: (context) => DefaultTabController(
-          length: 5,
+          length: 7,
           child: AlertDialog(
             titlePadding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
             contentPadding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
@@ -330,7 +330,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   const TabBar(
                     tabs: [
                       Tab(height: 36, text: '常规'),
+                      Tab(height: 36, text: '主题'),
                       Tab(height: 36, text: '压缩'),
+                      Tab(height: 36, text: '解压'),
                       Tab(height: 36, text: '文件关联'),
                       Tab(height: 36, text: '外部程序'),
                       Tab(height: 36, text: '密码'),
@@ -341,6 +343,35 @@ class _SettingsDialogState extends State<SettingsDialog> {
                     child: TabBarView(
                       children: [
                         ListView(
+                          key: const PageStorageKey('settingsGeneral'),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          children: [
+                            SwitchListTile(
+                              title: const Text('隔行背景色'),
+                              subtitle: const Text('使用交替背景区分相邻文件，适配当前主题'),
+                              value: _alternateRows,
+                              onChanged: (value) =>
+                                  setState(() => _alternateRows = value),
+                            ),
+                            SwitchListTile(
+                              title: const Text('单击打开文件和文件夹'),
+                              subtitle: const Text('关闭后使用双击打开，勾选框用于多选'),
+                              value: _singleClickOpen,
+                              onChanged: (value) =>
+                                  setState(() => _singleClickOpen = value),
+                            ),
+                            SwitchListTile(
+                              title: const Text('显示返回上一级目录项（..）'),
+                              subtitle: const Text('仅在压缩包子目录显示，返回包内上一级目录'),
+                              value: _showDotEntries,
+                              onChanged: (value) =>
+                                  setState(() => _showDotEntries = value),
+                            ),
+                          ],
+                        ),
+                        ListView(
+                          key: const PageStorageKey('settingsTheme'),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
                           children: [
                             ListTile(
                               title: const Text('明暗模式'),
@@ -366,57 +397,6 @@ class _SettingsDialogState extends State<SettingsDialog> {
                                     setState(() => _themeMode = value);
                                   }
                                 },
-                              ),
-                            ),
-                            ListTile(
-                              title: const Text('创建与解压文件名规范化'),
-                              subtitle: const Text('规范等价拼写重名时停止操作，请调整名称后重试。'),
-                              trailing: DropdownButton<FilenameNormalization>(
-                                key: const ValueKey('filenameNormalization'),
-                                value: _filenameNormalization,
-                                items: [
-                                  for (final mode
-                                      in FilenameNormalization.values)
-                                    DropdownMenuItem(
-                                      value: mode,
-                                      child: Text(mode.label),
-                                    ),
-                                ],
-                                onChanged: _saving
-                                    ? null
-                                    : (value) {
-                                        if (value != null) {
-                                          setState(
-                                            () =>
-                                                _filenameNormalization = value,
-                                          );
-                                        }
-                                      },
-                              ),
-                            ),
-                            ListTile(
-                              title: const Text('ZIP 文件名编码'),
-                              trailing: DropdownButton<FilenameEncoding>(
-                                key: const ValueKey('filenameEncoding'),
-                                value: _filenameEncoding,
-                                style: Theme.of(context).textTheme.bodyMedium,
-                                items: [
-                                  for (final encoding
-                                      in FilenameEncoding.values)
-                                    DropdownMenuItem(
-                                      value: encoding,
-                                      child: Text(encoding.label),
-                                    ),
-                                ],
-                                onChanged: _saving
-                                    ? null
-                                    : (value) {
-                                        if (value != null) {
-                                          setState(
-                                            () => _filenameEncoding = value,
-                                          );
-                                        }
-                                      },
                               ),
                             ),
                             Padding(
@@ -487,60 +467,11 @@ class _SettingsDialogState extends State<SettingsDialog> {
                                 ],
                               ),
                             ),
-                            const Divider(height: 1),
-                            SwitchListTile(
-                              key: const ValueKey('autoUnpackTar'),
-                              title: const Text('自动解开 TAR 复合压缩包'),
-                              subtitle: const Text(
-                                'TAR.GZ / TAR.BZ2 / TAR.XZ 及 TGZ / TBZ / TBZ2 / TXZ 一次解压得到内部文件。关闭后浏览和解压外层，得到 TAR 文件',
-                              ),
-                              value: _autoUnpackTar,
-                              onChanged: (value) =>
-                                  setState(() => _autoUnpackTar = value),
-                            ),
-                            SwitchListTile(
-                              key: const ValueKey('smartExtraction'),
-                              title: const Text('智能选择解压目录'),
-                              subtitle: const Text(
-                                '单文件或单目录直接解压到所选位置，多项目使用压缩包名称的文件夹；Finder 原地解压直接使用同级目录',
-                              ),
-                              value: _smartExtraction,
-                              onChanged: (value) =>
-                                  setState(() => _smartExtraction = value),
-                            ),
-                            SwitchListTile(
-                              title: const Text('解压时删除冗余的根目录'),
-                              subtitle: const Text(
-                                '结果只有一个顶层文件夹时去掉这一层，适用于主窗口和 Finder 解压',
-                              ),
-                              value: _removeRedundantRoot,
-                              onChanged: (value) =>
-                                  setState(() => _removeRedundantRoot = value),
-                            ),
-                            SwitchListTile(
-                              title: const Text('隔行背景色'),
-                              subtitle: const Text('使用交替背景区分相邻文件，适配当前主题'),
-                              value: _alternateRows,
-                              onChanged: (value) =>
-                                  setState(() => _alternateRows = value),
-                            ),
-                            SwitchListTile(
-                              title: const Text('单击打开文件和文件夹'),
-                              subtitle: const Text('关闭后使用双击打开，勾选框用于多选'),
-                              value: _singleClickOpen,
-                              onChanged: (value) =>
-                                  setState(() => _singleClickOpen = value),
-                            ),
-                            SwitchListTile(
-                              title: const Text('显示返回上一级目录项（..）'),
-                              subtitle: const Text('仅在压缩包子目录显示，返回包内上一级目录'),
-                              value: _showDotEntries,
-                              onChanged: (value) =>
-                                  setState(() => _showDotEntries = value),
-                            ),
                           ],
                         ),
                         ListView(
+                          key: const PageStorageKey('settingsCompression'),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
                           children: [
                             DropdownButtonFormField<String>(
                               key: const ValueKey('defaultCompressionPreset'),
@@ -583,6 +514,95 @@ class _SettingsDialogState extends State<SettingsDialog> {
                                   '${preset.format.toUpperCase()} · 等级 ${preset.level} · ${preset.volumeSize == 0 ? '不分卷' : '${preset.volumeSize ~/ 1048576} MiB / 卷'}',
                                 ),
                               ),
+                          ],
+                        ),
+                        ListView(
+                          key: const PageStorageKey('settingsExtraction'),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          children: [
+                            ListTile(
+                              title: const Text('ZIP 文件名编码'),
+                              subtitle: const Text(
+                                '用于读取旧 ZIP。UTF-8 标志和有效 Unicode 扩展优先。乱码时按来源地区选择代码页。',
+                              ),
+                              trailing: DropdownButton<FilenameEncoding>(
+                                key: const ValueKey('filenameEncoding'),
+                                value: _filenameEncoding,
+                                style: Theme.of(context).textTheme.bodyMedium,
+                                items: [
+                                  for (final encoding
+                                      in FilenameEncoding.values)
+                                    DropdownMenuItem(
+                                      value: encoding,
+                                      child: Text(encoding.label),
+                                    ),
+                                ],
+                                onChanged: _saving
+                                    ? null
+                                    : (value) {
+                                        if (value != null) {
+                                          setState(
+                                            () => _filenameEncoding = value,
+                                          );
+                                        }
+                                      },
+                              ),
+                            ),
+                            ListTile(
+                              title: const Text('创建与解压文件名规范化'),
+                              subtitle: const Text('规范等价拼写重名时停止操作，请调整名称后重试。'),
+                              trailing: DropdownButton<FilenameNormalization>(
+                                key: const ValueKey('filenameNormalization'),
+                                value: _filenameNormalization,
+                                items: [
+                                  for (final mode
+                                      in FilenameNormalization.values)
+                                    DropdownMenuItem(
+                                      value: mode,
+                                      child: Text(mode.label),
+                                    ),
+                                ],
+                                onChanged: _saving
+                                    ? null
+                                    : (value) {
+                                        if (value != null) {
+                                          setState(
+                                            () =>
+                                                _filenameNormalization = value,
+                                          );
+                                        }
+                                      },
+                              ),
+                            ),
+                            SwitchListTile(
+                              key: const ValueKey('autoUnpackTar'),
+                              title: const Text('自动解开 TAR 复合压缩包'),
+                              subtitle: const Text(
+                                'TAR.GZ / TAR.BZ2 / TAR.XZ 及 TGZ / TBZ / TBZ2 / TXZ 一次解压得到内部文件。关闭后浏览和解压外层，得到 TAR 文件',
+                              ),
+                              value: _autoUnpackTar,
+                              onChanged: (value) =>
+                                  setState(() => _autoUnpackTar = value),
+                            ),
+                            SwitchListTile(
+                              key: const ValueKey('smartExtraction'),
+                              title: const Text('智能选择解压目录'),
+                              subtitle: const Text(
+                                '单文件或单目录直接解压到所选位置，多项目使用压缩包名称的文件夹；Finder 原地解压直接使用同级目录',
+                              ),
+                              value: _smartExtraction,
+                              onChanged: (value) =>
+                                  setState(() => _smartExtraction = value),
+                            ),
+                            SwitchListTile(
+                              title: const Text('解压时删除冗余的根目录'),
+                              subtitle: const Text(
+                                '结果只有一个顶层文件夹时去掉这一层，适用于主窗口和 Finder 解压',
+                              ),
+                              value: _removeRedundantRoot,
+                              onChanged: (value) =>
+                                  setState(() => _removeRedundantRoot = value),
+                            ),
                           ],
                         ),
                         Column(
@@ -655,6 +675,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
                           ],
                         ),
                         ListView(
+                          key: const PageStorageKey('settingsPrograms'),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
                           children: [
                             const Text(
                               '查看时使用查看程序，编辑时监控保存并自动回写 ZIP / 7z。\n留空时使用系统默认程序。',

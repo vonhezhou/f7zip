@@ -109,6 +109,8 @@ with zipfile.ZipFile(sys.argv[1], 'w') as output:
 Future<void> _chooseEncoding(WidgetTester tester, String label) async {
   await tester.tap(find.byTooltip('设置'));
   await tester.pumpAndSettle();
+  await tester.tap(find.text('解压'));
+  await tester.pumpAndSettle();
   await tester.tap(find.byKey(const ValueKey('filenameEncoding')));
   await tester.pumpAndSettle();
   await tester.ensureVisible(find.text(label).last);

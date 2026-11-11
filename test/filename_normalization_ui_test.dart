@@ -70,6 +70,8 @@ void main() {
     );
     await tester.tap(find.text('设置'));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('解压'));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('filenameNormalization')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('NFC · 组合形式').last);
@@ -78,6 +80,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(persisted['filenameNormalization'], 'nfc');
     await tester.tap(find.text('设置'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('解压'));
     await tester.pumpAndSettle();
     expect(
       tester

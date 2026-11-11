@@ -8,6 +8,7 @@ import ImageIO
 class MainFlutterWindow: NSWindow {
   private let passwordStore = ArchivePasswordStore()
   private let passwordQueue = DispatchQueue(label: "dev.von.f7zip.passwords")
+  private var themeColorDialog: ThemeColorDialog?
   private var channel: FlutterMethodChannel?
   private var archiveMenu: ArchiveMenuTarget?
   private var dragSources: [String: ArchiveFileDragSource] = [:]
@@ -34,6 +35,26 @@ class MainFlutterWindow: NSWindow {
     previewTerminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
       self?.cleanupArchivePreviews()
       self?.cleanupNestedArchives()
+    }
+    let colorBridge = FlutterMethodChannel(name: "sevenzip/themeColor", binaryMessenger: controller.engine.binaryMessenger)
+    colorBridge.setMethodCallHandler { [weak self] call, result in
+      guard let self else { result(nil); return }
+      guard call.method == "chooseColor", let initial = call.arguments as? Int64 else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      guard self.themeColorDialog == nil else {
+        result(FlutterError(code: "busy", message: "调色盘已打开", details: nil))
+        return
+      }
+      let dialog = ThemeColorDialog(initialColor: initial, onChanged: { color in
+        colorBridge.invokeMethod("colorChanged", arguments: color)
+      }, completion: { [weak self] color in
+        self?.themeColorDialog = nil
+        result(color)
+      })
+      self.themeColorDialog = dialog
+      dialog.present(relativeTo: self)
     }
     bridge.setMethodCallHandler { call, result in
       switch call.method {
@@ -671,5 +692,95 @@ private class ArchivePreviewWindowController: NSWindowController, NSWindowDelega
   func windowWillClose(_ notification: Notification) {
     preview.close()
     onClosed?()
+  }
+}
+
+// 沿用 fruler 的 NSColorPanel 布局，保留系统色轮、滑块和颜色样本。
+private final class ThemeColorDialog: NSObject, NSWindowDelegate {
+  private let panel: NSColorPanel
+  private var completion: ((Int64?) -> Void)?
+  private let onChanged: (Int64) -> Void
+  private weak var owner: NSWindow?
+
+  init(initialColor: Int64, onChanged: @escaping (Int64) -> Void,
+       completion: @escaping (Int64?) -> Void) {
+    panel = NSColorPanel(contentRect: NSRect(x: 0, y: 0, width: 266, height: 390),
+      styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    self.onChanged = onChanged
+    self.completion = completion
+    super.init()
+    panel.title = "主题调色盘"
+    panel.isReleasedWhenClosed = false
+    panel.delegate = self
+    panel.showsAlpha = false
+    panel.mode = .wheel
+    panel.color = NSColor(srgbRed: CGFloat((initialColor >> 16) & 255) / 255,
+      green: CGFloat((initialColor >> 8) & 255) / 255,
+      blue: CGFloat(initialColor & 255) / 255, alpha: 1)
+    panel.isContinuous = true
+    panel.setTarget(self)
+    panel.setAction(#selector(colorChanged(_:)))
+    let systemContent = panel.contentView!
+    let size = NSSize(width: systemContent.frame.width, height: systemContent.frame.height + 44)
+    let content = NSView(frame: NSRect(origin: .zero, size: size))
+    let footer = NSView(frame: NSRect(x: 0, y: 0, width: size.width, height: 44))
+    let confirm = NSButton(title: "确定", target: self, action: #selector(confirm(_:)))
+    let cancel = NSButton(title: "取消", target: self, action: #selector(cancel(_:)))
+    confirm.keyEquivalent = "\r"
+    cancel.keyEquivalent = "\u{1b}"
+    for button in [cancel, confirm] {
+      button.bezelStyle = .rounded
+      button.translatesAutoresizingMaskIntoConstraints = false
+      footer.addSubview(button)
+    }
+    NSLayoutConstraint.activate([
+      confirm.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -12),
+      confirm.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+      confirm.widthAnchor.constraint(equalToConstant: 72),
+      cancel.trailingAnchor.constraint(equalTo: confirm.leadingAnchor, constant: -8),
+      cancel.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+      cancel.widthAnchor.constraint(equalToConstant: 72),
+    ])
+    panel.contentView = nil
+    systemContent.setFrameOrigin(NSPoint(x: 0, y: 44))
+    systemContent.autoresizingMask = [.width, .height]
+    content.addSubview(systemContent)
+    footer.autoresizingMask = [.width]
+    content.addSubview(footer)
+    panel.contentView = content
+    panel.setContentSize(size)
+  }
+
+  func present(relativeTo owner: NSWindow) {
+    self.owner = owner
+    owner.beginSheet(panel)
+  }
+
+  private var selectedColor: Int64? {
+    guard let color = panel.color.usingColorSpace(.sRGB) else { return nil }
+    func byte(_ value: CGFloat) -> Int64 { Int64((min(1, max(0, value)) * 255).rounded()) }
+    return 0xFF000000 | byte(color.redComponent) << 16 |
+      byte(color.greenComponent) << 8 | byte(color.blueComponent)
+  }
+
+  @objc private func colorChanged(_ sender: Any?) {
+    if let color = selectedColor { onChanged(color) }
+  }
+  @objc private func confirm(_ sender: Any?) {
+    guard let color = selectedColor else { NSSound.beep(); return }
+    finish(color)
+  }
+  @objc private func cancel(_ sender: Any?) { finish(nil) }
+  func windowShouldClose(_ sender: NSWindow) -> Bool { finish(nil); return false }
+
+  private func finish(_ color: Int64?) {
+    guard let reply = completion else { return }
+    completion = nil
+    panel.delegate = nil
+    panel.setTarget(nil)
+    owner?.endSheet(panel)
+    panel.orderOut(nil)
+    panel.close()
+    reply(color)
   }
 }

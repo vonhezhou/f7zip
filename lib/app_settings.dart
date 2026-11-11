@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'app_theme.dart';
+import 'custom_theme_controls.dart';
 import 'filename_encoding.dart';
 import 'filename_normalization.dart';
 import 'compression_preset.dart';
@@ -22,6 +23,8 @@ class AppSettings {
     this.editor = '',
     this.themeMode = ThemeMode.system,
     this.colorTheme = AppColorTheme.purple,
+    this.customThemes = const [],
+    this.selectedCustomTheme = '',
     this.filenameEncoding = FilenameEncoding.autoDetect,
     this.filenameNormalization = FilenameNormalization.preserve,
     this.compressionPresets = const [],
@@ -41,8 +44,25 @@ class AppSettings {
         }
       }
     }
+    final themes = <CustomColorTheme>[];
+    final storedThemes = json['customThemes'];
+    if (storedThemes is List) {
+      for (final entry in storedThemes) {
+        try {
+          final theme = CustomColorTheme.fromJson(entry);
+          if (!themes.any((item) => item.name == theme.name)) themes.add(theme);
+        } on FormatException {
+          // 跳过损坏条目，其余主题仍可使用。
+        }
+      }
+    }
+    final selectedTheme = json['selectedCustomTheme'];
     final defaultName = json['defaultCompressionPreset'];
     return AppSettings(
+      customThemes: List.unmodifiable(themes),
+      selectedCustomTheme: themes.any((theme) => theme.name == selectedTheme)
+          ? selectedTheme as String
+          : '',
       compressionPresets: List.unmodifiable(presets),
       defaultCompressionPreset:
           presets.any((preset) => preset.name == defaultName)
@@ -94,6 +114,8 @@ class AppSettings {
     editor: editor,
     themeMode: themeMode,
     colorTheme: colorTheme,
+    customThemes: customThemes,
+    selectedCustomTheme: selectedCustomTheme,
     filenameEncoding: filenameEncoding,
     filenameNormalization: filenameNormalization,
     compressionPresets: List.unmodifiable(presets),
@@ -111,6 +133,12 @@ class AppSettings {
   final String editor;
   final ThemeMode themeMode;
   final AppColorTheme colorTheme;
+  final List<CustomColorTheme> customThemes;
+  final String selectedCustomTheme;
+
+  CustomColorTheme? get customTheme => customThemes
+      .where((theme) => theme.name == selectedCustomTheme)
+      .firstOrNull;
   final FilenameEncoding filenameEncoding;
   final FilenameNormalization filenameNormalization;
 
@@ -130,6 +158,8 @@ class AppSettings {
     'editor': editor,
     'themeMode': themeMode.name,
     'colorTheme': colorTheme.name,
+    'customThemes': customThemes.map((theme) => theme.toJson()).toList(),
+    'selectedCustomTheme': selectedCustomTheme,
     'filenameEncoding': filenameEncoding.name,
     'filenameNormalization': filenameNormalization.name,
   };
@@ -147,6 +177,13 @@ class _SettingsDialogState extends State<SettingsDialog> {
       widget.initial.defaultCompressionPreset;
   late ThemeMode _themeMode = widget.initial.themeMode;
   late AppColorTheme _colorTheme = widget.initial.colorTheme;
+  late List<CustomColorTheme> _customThemes = List.of(
+    widget.initial.customThemes,
+  );
+  late String _selectedCustomTheme = widget.initial.selectedCustomTheme;
+  CustomColorTheme? get _customTheme => _customThemes
+      .where((theme) => theme.name == _selectedCustomTheme)
+      .firstOrNull;
   late FilenameEncoding _filenameEncoding = widget.initial.filenameEncoding;
   late FilenameNormalization _filenameNormalization =
       widget.initial.filenameNormalization;
@@ -161,6 +198,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late final _editor = TextEditingController(text: widget.initial.editor);
   List<Map<String, dynamic>> _associations = [];
   bool _saving = false;
+  bool _themeBusy = false;
   bool _binding = false;
   String? _error;
 
@@ -233,6 +271,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
       defaultCompressionPreset: _defaultCompressionPreset,
       themeMode: _themeMode,
       colorTheme: _colorTheme,
+      customThemes: List.unmodifiable(_customThemes),
+      selectedCustomTheme: _selectedCustomTheme,
       filenameEncoding: _filenameEncoding,
       filenameNormalization: _filenameNormalization,
       alternateRows: _alternateRows,
@@ -270,7 +310,11 @@ class _SettingsDialogState extends State<SettingsDialog> {
       ThemeMode.dark => Brightness.dark,
     };
     return Theme(
-      data: buildAppTheme(brightness, colorTheme: _colorTheme),
+      data: buildAppTheme(
+        brightness,
+        colorTheme: _colorTheme,
+        customTheme: _customTheme,
+      ),
       child: Builder(
         builder: (context) => DefaultTabController(
           length: 5,
@@ -407,14 +451,38 @@ class _SettingsDialogState extends State<SettingsDialog> {
                                                   brightness: brightness,
                                                 ).primary,
                                           ),
-                                          selected: _colorTheme == theme,
+                                          selected:
+                                              _selectedCustomTheme.isEmpty &&
+                                              _colorTheme == theme,
                                           onSelected: _saving
                                               ? null
-                                              : (_) => setState(
-                                                  () => _colorTheme = theme,
-                                                ),
+                                              : (_) => setState(() {
+                                                  _colorTheme = theme;
+                                                  _selectedCustomTheme = '';
+                                                }),
                                         ),
                                     ],
+                                  ),
+                                  CustomThemeControls(
+                                    onBusyChanged: (busy) =>
+                                        setState(() => _themeBusy = busy),
+                                    themes: _customThemes,
+                                    selected: _selectedCustomTheme,
+                                    seedColor:
+                                        _customTheme?.seedColor ??
+                                        _colorTheme.seedColor,
+                                    exportTheme:
+                                        _customTheme ??
+                                        CustomColorTheme(
+                                          name: _colorTheme.label,
+                                          seedColor: _colorTheme.seedColor,
+                                        ),
+                                    enabled: !_saving,
+                                    onChanged: (themes, selected) =>
+                                        setState(() {
+                                          _customThemes = themes;
+                                          _selectedCustomTheme = selected;
+                                        }),
                                   ),
                                 ],
                               ),
@@ -649,13 +717,13 @@ class _SettingsDialogState extends State<SettingsDialog> {
             ),
             actions: [
               TextButton(
-                onPressed: _saving || _binding
+                onPressed: _saving || _binding || _themeBusy
                     ? null
                     : () => Navigator.pop(context),
                 child: const Text('取消'),
               ),
               FilledButton(
-                onPressed: _saving || _binding ? null : _save,
+                onPressed: _saving || _binding || _themeBusy ? null : _save,
                 child: Text(_saving ? '保存中…' : '保存设置'),
               ),
             ],

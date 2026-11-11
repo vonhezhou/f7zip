@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 
 enum AppColorTheme {
@@ -11,6 +13,50 @@ enum AppColorTheme {
   const AppColorTheme(this.label, this.seedColor);
   final String label;
   final Color seedColor;
+}
+
+class CustomColorTheme {
+  const CustomColorTheme({required this.name, required this.seedColor});
+
+  factory CustomColorTheme.fromJson(dynamic json) {
+    if (json is! Map ||
+        json['name'] is! String ||
+        (json['name'] as String).trim().isEmpty ||
+        (json['name'] as String).trim().length > 80 ||
+        json['seedColor'] is! String ||
+        !RegExp(r'^#[0-9a-fA-F]{6}$').hasMatch(json['seedColor'] as String)) {
+      throw const FormatException('主题需要 1–80 字的名称和 #RRGGBB 格式的颜色');
+    }
+    return CustomColorTheme(
+      name: (json['name'] as String).trim(),
+      seedColor: Color(
+        0xFF000000 |
+            int.parse((json['seedColor'] as String).substring(1), radix: 16),
+      ),
+    );
+  }
+
+  final String name;
+  final Color seedColor;
+
+  String get hexColor =>
+      '#${(seedColor.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
+
+  Map<String, dynamic> toJson() => {'name': name, 'seedColor': hexColor};
+
+  String exportJson() =>
+      const JsonEncoder.withIndent('  ')
+          .convert({'format': 'f7zip-theme', 'version': 1, 'theme': toJson()});
+
+  static CustomColorTheme importJson(String source) {
+    final json = jsonDecode(source);
+    if (json is! Map ||
+        json['format'] != 'f7zip-theme' ||
+        json['version'] != 1) {
+      throw const FormatException('不支持的主题文件格式或版本');
+    }
+    return CustomColorTheme.fromJson(json['theme']);
+  }
 }
 
 // 页面区域只映射 Material 3 语义色，随种子色和明暗模式统一变化。
@@ -41,9 +87,10 @@ class AppColors {
 ThemeData buildAppTheme(
   Brightness brightness, {
   AppColorTheme colorTheme = AppColorTheme.purple,
+  CustomColorTheme? customTheme,
 }) {
   final scheme = ColorScheme.fromSeed(
-    seedColor: colorTheme.seedColor,
+    seedColor: customTheme?.seedColor ?? colorTheme.seedColor,
     brightness: brightness,
   );
   final colors = AppColors(scheme);

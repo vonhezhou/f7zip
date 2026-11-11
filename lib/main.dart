@@ -39,13 +39,16 @@ class F7ZipApp extends StatefulWidget {
 class _F7ZipAppState extends State<F7ZipApp> {
   ThemeMode _themeMode = ThemeMode.system;
   AppColorTheme _colorTheme = AppColorTheme.purple;
+  CustomColorTheme? _customTheme;
 
   void _applySettings(AppSettings settings) {
     if (_themeMode != settings.themeMode ||
-        _colorTheme != settings.colorTheme) {
+        _colorTheme != settings.colorTheme ||
+        _customTheme != settings.customTheme) {
       setState(() {
         _themeMode = settings.themeMode;
         _colorTheme = settings.colorTheme;
+        _customTheme = settings.customTheme;
       });
     }
     _desktop.invokeMethod<void>('setAppearance', settings.themeMode.name);
@@ -55,8 +58,16 @@ class _F7ZipAppState extends State<F7ZipApp> {
   Widget build(BuildContext context) => MaterialApp(
     title: 'F7Zip',
     debugShowCheckedModeBanner: false,
-    theme: buildAppTheme(Brightness.light, colorTheme: _colorTheme),
-    darkTheme: buildAppTheme(Brightness.dark, colorTheme: _colorTheme),
+    theme: buildAppTheme(
+      Brightness.light,
+      colorTheme: _colorTheme,
+      customTheme: _customTheme,
+    ),
+    darkTheme: buildAppTheme(
+      Brightness.dark,
+      colorTheme: _colorTheme,
+      customTheme: _customTheme,
+    ),
     themeMode: _themeMode,
     home: ArchiveWindow(onSettingsChanged: _applySettings),
   );

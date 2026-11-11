@@ -1,5 +1,9 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:f7zip/app_settings.dart';
 import 'package:f7zip/app_theme.dart';
+import 'package:f7zip/main.dart';
 import 'package:f7zip/filename_encoding.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -47,6 +51,229 @@ void main() {
     );
     expect(AppSettings.fromJson(settings.toJson()).toJson(), settings.toJson());
     expect(settings.withCompressionPresets([], '').autoUnpackTar, isFalse);
+  });
+
+  test('自定义主题文件往返、设置恢复与压缩预设更新保留主题', () {
+    const theme = CustomColorTheme(name: '自定义蓝', seedColor: Color(0xFF123456));
+    expect(
+      CustomColorTheme.importJson(theme.exportJson()).toJson(),
+      theme.toJson(),
+    );
+    const settings = AppSettings(
+      customThemes: [theme],
+      selectedCustomTheme: '自定义蓝',
+    );
+    final restored = AppSettings.fromJson(settings.toJson());
+    expect(restored.toJson(), settings.toJson());
+    expect(
+      restored.withCompressionPresets([], '').customTheme!.toJson(),
+      theme.toJson(),
+    );
+    for (final brightness in Brightness.values) {
+      expect(
+        buildAppTheme(
+          brightness,
+          customTheme: restored.customTheme,
+        ).colorScheme,
+        ColorScheme.fromSeed(
+          seedColor: theme.seedColor,
+          brightness: brightness,
+        ),
+      );
+    }
+    final damaged = AppSettings.fromJson({
+      'customThemes': [
+        null,
+        {'name': '坏颜色', 'seedColor': '#123'},
+        theme.toJson(),
+        theme.toJson(),
+      ],
+      'selectedCustomTheme': '不存在',
+    });
+    expect(damaged.customThemes.length, 1);
+    expect(damaged.customTheme, isNull);
+    expect(AppSettings.fromJson({}).customThemes, isEmpty);
+  });
+
+  test('主题文件拒绝损坏格式、未知版本、无效名称和颜色', () {
+    for (final source in [
+      'bad json',
+      '[]',
+      '{}',
+      jsonEncode({'format': 'f7zip-theme', 'version': 2}),
+      for (final theme in [
+        null,
+        {'name': '', 'seedColor': '#123456'},
+        {'name': 'a' * 81, 'seedColor': '#123456'},
+        {'name': '颜色', 'seedColor': '#GGGGGG'},
+        {'name': '颜色', 'seedColor': '#80123456'},
+        {'name': 123, 'seedColor': '#123456'},
+      ])
+        jsonEncode({'format': 'f7zip-theme', 'version': 1, 'theme': theme}),
+    ]) {
+      expect(() => CustomColorTheme.importJson(source), throwsFormatException);
+    }
+  });
+
+  testWidgets('自定义主题编辑与删除可预览，取消放弃，保存后重启恢复全局配色', (tester) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    Map<dynamic, dynamic> persisted = {};
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'loadSettings') return persisted;
+          if (call.method == 'saveSettings') {
+            persisted = Map.from(call.arguments as Map);
+          }
+          return null;
+        });
+    await tester.pumpWidget(const F7ZipApp());
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    await _revealSetting(tester, '自定义主题…');
+    await tester.tap(find.text('自定义主题…'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('保存主题'));
+    await tester.pumpAndSettle();
+    expect(find.text('请输入主题名称'), findsOneWidget);
+    await tester.enterText(find.byKey(const ValueKey('customThemeName')), '夜空');
+    await tester.enterText(
+      find.byKey(const ValueKey('customThemeColor')),
+      '#123456',
+    );
+    await tester.tap(find.text('保存主题'));
+    await tester.pumpAndSettle();
+    final expected = buildAppTheme(
+      Brightness.light,
+      customTheme: const CustomColorTheme(
+        name: '夜空',
+        seedColor: Color(0xFF123456),
+      ),
+    ).colorScheme;
+    expect(
+      Theme.of(tester.element(find.byType(AlertDialog))).colorScheme,
+      expected,
+    );
+    expect(persisted, isEmpty);
+    await tester.ensureVisible(find.text('编辑主题'));
+    await tester.tap(find.text('编辑主题'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const ValueKey('customThemeName')),
+      '夜空蓝',
+    );
+    await tester.tap(find.text('保存主题'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('保存设置'));
+    await tester.pumpAndSettle();
+    expect(persisted['selectedCustomTheme'], '夜空蓝');
+    expect(
+      Theme.of(tester.element(find.byType(Scaffold))).colorScheme,
+      expected,
+    );
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(const F7ZipApp());
+    await tester.pumpAndSettle();
+    expect(
+      Theme.of(tester.element(find.byType(Scaffold))).colorScheme,
+      expected,
+    );
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    await _revealSetting(tester, '删除主题');
+    await tester.tap(find.text('删除主题'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('customTheme:夜空蓝')), findsNothing);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(persisted['selectedCustomTheme'], '夜空蓝');
+    expect(
+      Theme.of(tester.element(find.byType(Scaffold))).colorScheme,
+      expected,
+    );
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    await _revealSetting(tester, '删除主题');
+    await tester.tap(find.text('删除主题'));
+    await tester.tap(find.text('保存设置'));
+    await tester.pumpAndSettle();
+    expect(persisted['customThemes'], isEmpty);
+    expect(persisted['selectedCustomTheme'], '');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('主题导入导出真实文件、同名保留、错误和取消保护设置', (tester) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final root = Directory.systemTemp.createTempSync('f7zip-themes-');
+    addTearDown(() => root.deleteSync(recursive: true));
+    final input = File('${root.path}/input.json');
+    final output = File('${root.path}/output.json');
+    const theme = CustomColorTheme(name: '导入蓝', seedColor: Color(0xFF112233));
+    input.writeAsStringSync(theme.exportJson());
+    Map<dynamic, dynamic>? persisted;
+    var cancel = false;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'importTheme') return cancel ? null : input.path;
+          if (call.method == 'exportTheme') return output.path;
+          if (call.method == 'saveSettings') {
+            persisted = Map.from(call.arguments as Map);
+          }
+          return null;
+        });
+    await tester.pumpWidget(
+      const MaterialApp(home: SettingsDialog(initial: AppSettings())),
+    );
+    await tester.pumpAndSettle();
+    Future<void> transfer(String label) async {
+      await tester.ensureVisible(find.text(label));
+      await tester.tap(find.text(label));
+      await tester.pump();
+      // 文件 I/O 在真实事件循环执行，并等待界面退出忙碌状态。
+      for (var attempt = 0; attempt < 100; attempt++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump();
+        if (tester
+                .widget<FilledButton>(find.widgetWithText(FilledButton, '保存设置'))
+                .onPressed !=
+            null) {
+          break;
+        }
+      }
+      await tester.pumpAndSettle();
+    }
+
+    await transfer('导入主题…');
+    expect(find.byKey(const ValueKey('customTheme:导入蓝')), findsOneWidget);
+    await transfer('导入主题…');
+    expect(find.byKey(const ValueKey('customTheme:导入蓝 (2)')), findsOneWidget);
+    await transfer('导出当前主题…');
+    final exported = CustomColorTheme.importJson(output.readAsStringSync());
+    expect(exported.name, '导入蓝 (2)');
+    expect(exported.seedColor, theme.seedColor);
+    input.writeAsStringSync('{}');
+    await transfer('导入主题…');
+    expect(find.textContaining('导入失败'), findsOneWidget);
+    input.writeAsStringSync('a' * 65537);
+    await transfer('导入主题…');
+    expect(find.textContaining('主题文件超过 64 KiB'), findsOneWidget);
+    cancel = true;
+    await transfer('导入主题…');
+    expect(find.textContaining('导入失败'), findsNothing);
+    await tester.tap(find.text('保存设置'));
+    await tester.pumpAndSettle();
+    expect((persisted!['customThemes'] as List).length, 2);
+    expect(persisted!['selectedCustomTheme'], '导入蓝 (2)');
+    expect(tester.takeException(), isNull);
   });
 
   test('所有颜色主题在浅深色下使用完整的 Material 3 语义色', () {
@@ -141,7 +368,12 @@ void main() {
       find.text('单击打开文件和文件夹'),
       100,
       scrollable: find.descendant(
-        of: find.byType(ListView).first,
+        of: find
+            .descendant(
+              of: find.byType(SettingsDialog),
+              matching: find.byType(ListView),
+            )
+            .first,
         matching: find.byType(Scrollable),
       ),
     );
@@ -184,4 +416,21 @@ void main() {
     );
     expect(tester.takeException(), isNull);
   });
+}
+
+Future<void> _revealSetting(WidgetTester tester, String label) async {
+  await tester.scrollUntilVisible(
+    find.text(label),
+    100,
+    scrollable: find.descendant(
+      of: find
+          .descendant(
+            of: find.byType(SettingsDialog),
+            matching: find.byType(ListView),
+          )
+          .first,
+      matching: find.byType(Scrollable),
+    ),
+  );
+  await tester.pumpAndSettle();
 }

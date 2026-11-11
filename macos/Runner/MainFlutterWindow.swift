@@ -176,6 +176,25 @@ class MainFlutterWindow: NSWindow {
           try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
           result(directory.path)
         } catch { result(FlutterError(code: "workspace", message: error.localizedDescription, details: nil)) }
+      case "importTheme":
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "导入主题"
+        panel.beginSheetModal(for: self) { response in
+          result(response == .OK ? panel.url?.path : nil)
+        }
+      case "exportTheme":
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "F7Zip-theme.json"
+        panel.canCreateDirectories = true
+        panel.prompt = "导出主题"
+        panel.beginSheetModal(for: self) { response in
+          result(response == .OK ? panel.url?.path : nil)
+        }
       case "chooseApplication":
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.applicationBundle]

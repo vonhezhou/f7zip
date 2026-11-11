@@ -16,6 +16,7 @@ class AppSettings {
     this.showDotEntries = true,
     this.removeRedundantRoot = false,
     this.smartExtraction = false,
+    this.autoUnpackTar = true,
     this.autoTryPasswords = false,
     this.viewer = '',
     this.editor = '',
@@ -52,6 +53,7 @@ class AppSettings {
       showDotEntries: json['showDotEntries'] as bool? ?? true,
       removeRedundantRoot: json['removeRedundantRoot'] as bool? ?? false,
       smartExtraction: json['smartExtraction'] as bool? ?? false,
+      autoUnpackTar: json['autoUnpackTar'] as bool? ?? true,
       autoTryPasswords: json['autoTryPasswords'] == true,
       viewer: json['viewer'] as String? ?? '',
       editor: json['editor'] as String? ?? '',
@@ -86,6 +88,7 @@ class AppSettings {
     showDotEntries: showDotEntries,
     removeRedundantRoot: removeRedundantRoot,
     smartExtraction: smartExtraction,
+    autoUnpackTar: autoUnpackTar,
     autoTryPasswords: autoTryPasswords,
     viewer: viewer,
     editor: editor,
@@ -102,6 +105,7 @@ class AppSettings {
   final bool showDotEntries;
   final bool removeRedundantRoot;
   final bool smartExtraction;
+  final bool autoUnpackTar;
   final bool autoTryPasswords;
   final String viewer;
   final String editor;
@@ -120,6 +124,7 @@ class AppSettings {
     'showDotEntries': showDotEntries,
     'removeRedundantRoot': removeRedundantRoot,
     'smartExtraction': smartExtraction,
+    'autoUnpackTar': autoUnpackTar,
     'autoTryPasswords': autoTryPasswords,
     'viewer': viewer,
     'editor': editor,
@@ -149,6 +154,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late bool _singleClickOpen = widget.initial.singleClickOpen;
   late bool _showDotEntries = widget.initial.showDotEntries;
   late bool _smartExtraction = widget.initial.smartExtraction;
+  late bool _autoUnpackTar = widget.initial.autoUnpackTar;
   late bool _autoTryPasswords = widget.initial.autoTryPasswords;
   late bool _removeRedundantRoot = widget.initial.removeRedundantRoot;
   late final _viewer = TextEditingController(text: widget.initial.viewer);
@@ -234,6 +240,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       showDotEntries: _showDotEntries,
       removeRedundantRoot: _removeRedundantRoot,
       smartExtraction: _smartExtraction,
+      autoUnpackTar: _autoUnpackTar,
       autoTryPasswords: _autoTryPasswords,
       viewer: _viewer.text.trim(),
       editor: _editor.text.trim(),
@@ -413,6 +420,16 @@ class _SettingsDialogState extends State<SettingsDialog> {
                               ),
                             ),
                             const Divider(height: 1),
+                            SwitchListTile(
+                              key: const ValueKey('autoUnpackTar'),
+                              title: const Text('自动解开 TAR 复合压缩包'),
+                              subtitle: const Text(
+                                'TAR.GZ / TAR.BZ2 / TAR.XZ 及 TGZ / TBZ / TBZ2 / TXZ 一次解压得到内部文件。关闭后浏览和解压外层，得到 TAR 文件',
+                              ),
+                              value: _autoUnpackTar,
+                              onChanged: (value) =>
+                                  setState(() => _autoUnpackTar = value),
+                            ),
                             SwitchListTile(
                               key: const ValueKey('smartExtraction'),
                               title: const Text('智能选择解压目录'),

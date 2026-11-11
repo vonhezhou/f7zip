@@ -8,6 +8,7 @@ void main() {
       '/archive.zip',
       destination: '/destination',
       removeRedundantRoot: true,
+      autoUnpackTar: false,
       itemPath: 'folder/file',
       expectedVersion: 'source-version',
       password: 'wrong',
@@ -28,6 +29,7 @@ void main() {
     expect(retried.archive, original.archive);
     expect(retried.destination, original.destination);
     expect(retried.removeRedundantRoot, original.removeRedundantRoot);
+    expect(retried.autoUnpackTar, isFalse);
     expect(retried.itemPath, original.itemPath);
     expect(retried.expectedVersion, original.expectedVersion);
     expect(retried.codePage, original.codePage);

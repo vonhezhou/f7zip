@@ -124,6 +124,7 @@ void main() {
     await tester.pumpAndSettle();
     final toggle = find.byKey(const ValueKey('smartExtraction'));
     await tester.ensureVisible(toggle);
+    await tester.pumpAndSettle();
     expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
     await tester.tap(toggle);
     await tester.tap(find.text('保存设置'));
@@ -135,7 +136,118 @@ void main() {
     await tester.tap(find.byTooltip('设置'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(toggle);
+    await tester.pumpAndSettle();
     expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
+    await tester.tap(find.text('取消'));
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  for (final enabled in [true, false]) {
+    for (final finder in [true, false]) {
+      testWidgets('TAR 复合解压实际入口 enabled=$enabled finder=$finder', (
+        tester,
+      ) async {
+        final root = Directory.systemTemp.createTempSync('f7zip-tar-ui-');
+        addTearDown(() => root.deleteSync(recursive: true));
+        final source = File(p.join(root.path, 'payload.txt'))
+          ..writeAsStringSync('payload');
+        final archive = p.join(root.path, 'bundle.tar.gz');
+        final output = Directory(p.join(root.path, 'output'))..createSync();
+        await tester.runAsync(
+          () => ArchiveEngine().run(
+            ArchiveRequest(
+              'compress',
+              archive,
+              format: 'tar.gz',
+              inputs: [source.path],
+            ),
+          ),
+        );
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'loadSettings') return {'autoUnpackTar': enabled};
+          if (call.method == 'takeFinderRequests') {
+            return [
+              {
+                'action': finder ? 'extractTo' : 'open',
+                'paths': [archive],
+              },
+            ];
+          }
+          if (call.method == 'chooseFolder') return [output.path];
+          if (call.method == 'finderChooseFolder') return output.path;
+          return null;
+        });
+        addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+        await tester.pumpWidget(const F7ZipApp());
+        if (!finder) {
+          await _until(
+            tester,
+            () =>
+                find.text('payload.txt').evaluate().isNotEmpty ||
+                find.text('archive.tar').evaluate().isNotEmpty,
+          );
+          expect(
+            find.text(enabled ? 'payload.txt' : 'archive.tar'),
+            findsWidgets,
+          );
+          await tester.tap(find.text('解压到…'));
+        }
+        await _until(
+          tester,
+          () => find.textContaining('解压完成 ·').evaluate().isNotEmpty,
+        );
+        final destination = finder
+            ? output
+            : Directory(p.join(output.path, 'bundle'));
+        final files = destination.listSync();
+        expect(files, hasLength(1));
+        expect(
+          p.basename(files.single.path),
+          enabled ? 'payload.txt' : 'archive.tar',
+        );
+        if (enabled) {
+          expect(File(files.single.path).readAsStringSync(), 'payload');
+        }
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      });
+    }
+  }
+
+  testWidgets('TAR 复合解包默认开启，关闭后保存并重启恢复', (tester) async {
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    Map<dynamic, dynamic> persisted = {};
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'loadSettings') return persisted;
+      if (call.method == 'saveSettings') {
+        persisted = Map<dynamic, dynamic>.from(call.arguments as Map);
+      }
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    await tester.pumpWidget(const F7ZipApp());
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    final toggle = find.byKey(const ValueKey('autoUnpackTar'));
+    await tester.ensureVisible(toggle);
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
+    await tester.tap(toggle);
+    await tester.tap(find.text('保存设置'));
+    await tester.pumpAndSettle();
+    expect(persisted['autoUnpackTar'], isFalse);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpWidget(const F7ZipApp());
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(toggle);
+    await tester.pumpAndSettle();
+    expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
     await tester.tap(find.text('取消'));
     await tester.pumpWidget(const SizedBox());
   });

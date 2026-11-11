@@ -28,6 +28,7 @@ LIB.f7_job_extraction_options.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctyp
 LIB.f7_job_volume_size.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
 LIB.f7_job_filename_normalization.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 LIB.f7_job_compression_parameters.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_int32]
+LIB.f7_job_auto_unpack_tar.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 LIB.f7_job_codepage.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 LIB.f7_free.argtypes = [ctypes.c_void_p]
 LIB.f7_run.restype = ctypes.c_void_p
@@ -36,12 +37,13 @@ LIB.f7_run.argtypes = [ctypes.c_void_p, *([ctypes.c_char_p] * 6), ctypes.c_int,
                       ctypes.POINTER(ctypes.c_uint32), ctypes.c_int]
 
 
-def execute(operation, archive, destination='', password='', format='zip', inputs=(), indices=(), job=None, code_page=0, volume_size=0, extraction_policy=0, expected_destination_version='', export_path='', export_version='', output_limit=0, filename_normalization=0, level=5, compression_parameters=None):
+def execute(operation, archive, destination='', password='', format='zip', inputs=(), indices=(), job=None, code_page=0, volume_size=0, extraction_policy=0, expected_destination_version='', export_path='', export_version='', output_limit=0, filename_normalization=0, level=5, compression_parameters=None, auto_unpack_tar=True):
     owned = job is None
     job = LIB.f7_job_create() if owned else job
     if compression_parameters is not None:
         method, dictionary, threads, solid = compression_parameters
         LIB.f7_job_compression_parameters(job, method.encode(), dictionary, threads, solid)
+    LIB.f7_job_auto_unpack_tar(job, auto_unpack_tar)
     LIB.f7_job_filename_normalization(job, filename_normalization)
     LIB.f7_job_output_limit(job, output_limit)
     LIB.f7_job_export_options(job, export_path.encode(), export_version.encode())
@@ -718,6 +720,37 @@ class NativeEngineTest(unittest.TestCase):
                 target.mkdir()
                 self.assertTrue(execute('extractHereFlat', archive, target)['ok'])
                 self.assertEqual((target / '你好.txt').read_bytes(), (self.source / '你好.txt').read_bytes())
+        self.assert_no_staging()
+
+    def test_compound_option_controls_listing_and_extraction_consistently(self):
+        for extension, mode in [('tar.gz', 'w:gz'), ('tar.bz2', 'w:bz2'),
+                                ('tar.xz', 'w:xz'), ('tgz', 'w:gz'),
+                                ('tbz', 'w:bz2'), ('tbz2', 'w:bz2'), ('txz', 'w:xz')]:
+            with self.subTest(extension=extension):
+                archive = self.root / ('option.' + extension)
+                with tarfile.open(archive, mode) as writer:
+                    writer.add(self.source, arcname='资料')
+                listing = execute('list', archive, auto_unpack_tar=False)
+                self.assertTrue(listing['ok'], listing)
+                self.assertEqual(len(listing['items']), 1)
+                item = listing['items'][0]
+                target = self.root / ('outer-' + extension)
+                response = execute('extract', archive, target,
+                                   indices=[item['index']], auto_unpack_tar=False)
+                self.assertTrue(response['ok'], response)
+                unpacked = list(target.iterdir())
+                self.assertEqual(len(unpacked), 1)
+                with tarfile.open(unpacked[0], 'r:') as reader:
+                    self.assertEqual(reader.extractfile('资料/你好.txt').read(),
+                                     (self.source / '你好.txt').read_bytes())
+                # 默认请求继续一步解开，关闭选项后重新开启也使用内层索引。
+                listing = execute('list', archive)
+                item = next(item for item in listing['items'] if item['path'] == '资料/你好.txt')
+                target = self.root / ('inner-' + extension)
+                response = execute('extract', archive, target, indices=[item['index']])
+                self.assertTrue(response['ok'], response)
+                self.assertEqual((target / item['path']).read_bytes(),
+                                 (self.source / '你好.txt').read_bytes())
         self.assert_no_staging()
 
     def test_compound_failure_cancellation_and_existing_target_protection(self):

@@ -198,6 +198,7 @@ class ArchiveRequest {
     this.archive, {
     this.destination = '',
     this.removeRedundantRoot = false,
+    this.autoUnpackTar = true,
     this.itemPath = '',
     this.expectedVersion = '',
     this.password = '',
@@ -217,11 +218,13 @@ class ArchiveRequest {
   ArchiveRequest withPassword(
     String value, {
     FilenameNormalization? filenameNormalization,
+    bool? autoUnpackTar,
   }) => ArchiveRequest(
     operation,
     archive,
     destination: destination,
     removeRedundantRoot: removeRedundantRoot,
+    autoUnpackTar: autoUnpackTar ?? this.autoUnpackTar,
     itemPath: itemPath,
     expectedVersion: expectedVersion,
     password: value,
@@ -242,6 +245,7 @@ class ArchiveRequest {
   final String archive;
   final String destination;
   final bool removeRedundantRoot;
+  final bool autoUnpackTar;
   final String itemPath;
   final String expectedVersion;
   final String password;
@@ -376,6 +380,9 @@ Map<String, dynamic> _execute(
     library.lookupFunction<_CodePageNative, _CodePage>(
       'f7_job_filename_normalization',
     )(job, request.filenameNormalization.index);
+    library.lookupFunction<_CodePageNative, _CodePage>(
+      'f7_job_auto_unpack_tar',
+    )(job, request.autoUnpackTar ? 1 : 0);
     library.lookupFunction<_CodePageNative, _CodePage>('f7_job_codepage')(
       job,
       request.codePage,

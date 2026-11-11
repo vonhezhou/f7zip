@@ -44,6 +44,7 @@ using namespace bit7z;
 
 struct Job {
     uint32_t codePage = 0;
+    bool autoUnpackTar = true;
     uint32_t filenameNormalization = 0;
     uint64_t volumeSize = 0;
     std::string compressionMethod = "auto";
@@ -1682,6 +1683,10 @@ __attribute__((visibility("default"))) void f7_job_filename_normalization(Job* j
     job->filenameNormalization = mode;
 }
 
+__attribute__((visibility("default"))) void f7_job_auto_unpack_tar(Job* job, uint32_t enabled) {
+    job->autoUnpackTar = enabled != 0;
+}
+
 __attribute__((visibility("default"))) void f7_job_codepage(Job* job, uint32_t codePage) {
     job->codePage = codePage;
 }
@@ -1981,7 +1986,7 @@ __attribute__((visibility("default"))) char* f7_run(
             return archiveName.size() >= suffix.size() && archiveName.compare(archiveName.size() - suffix.size(), suffix.size(), suffix) == 0;
         });
         const auto& outerFormat = opened->detectedFormat();
-        if (namedTar && (outerFormat == BitFormat::GZip || outerFormat == BitFormat::BZip2 || outerFormat == BitFormat::Xz)) {
+        if (job->autoUnpackTar && namedTar && (outerFormat == BitFormat::GZip || outerFormat == BitFormat::BZip2 || outerFormat == BitFormat::Xz)) {
             const auto tar = unpackSingleArchive(*opened, job, intermediates);
             opened = std::make_unique<BitArchiveReader>(library, tar.string(), BitFormat::Tar, password);
             callbacks(*opened, job);

@@ -595,6 +595,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     request = request.withPassword(
       request.password,
       filenameNormalization: _preferences.filenameNormalization,
+      autoUnpackTar: _preferences.autoUnpackTar,
     );
     final automatic =
         _preferences.autoTryPasswords && request.operation != 'compress';
@@ -2674,12 +2675,13 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       builder: (_) => SettingsDialog(initial: _preferences),
     );
     if (preferences != null && mounted) {
-      final encodingChanged =
-          _preferences.filenameEncoding != preferences.filenameEncoding;
+      final archiveViewChanged =
+          _preferences.filenameEncoding != preferences.filenameEncoding ||
+          _preferences.autoUnpackTar != preferences.autoUnpackTar;
       setState(() => _preferences = preferences);
       widget.onSettingsChanged?.call(preferences);
       final archive = _archive;
-      if (encodingChanged && archive != null) {
+      if (archiveViewChanged && archive != null) {
         await _open(
           archive,
           password: _password,

@@ -16,6 +16,7 @@ void main() {
   test('旧配置使用默认值，保存和重新加载保留浏览与程序设置', () {
     final defaults = AppSettings.fromJson({});
     expect(defaults.singleClickOpen, isTrue);
+    expect(defaults.autoUnpackTar, isTrue);
     expect(defaults.removeRedundantRoot, isFalse);
     expect(defaults.filenameEncoding, FilenameEncoding.autoDetect);
     expect(
@@ -40,10 +41,12 @@ void main() {
       singleClickOpen: false,
       showDotEntries: false,
       removeRedundantRoot: true,
+      autoUnpackTar: false,
       viewer: '/Applications/Viewer.app',
       editor: '/Applications/Editor.app',
     );
     expect(AppSettings.fromJson(settings.toJson()).toJson(), settings.toJson());
+    expect(settings.withCompressionPresets([], '').autoUnpackTar, isFalse);
   });
 
   test('所有颜色主题在浅深色下使用完整的 Material 3 语义色', () {

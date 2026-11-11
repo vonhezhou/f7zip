@@ -1,4 +1,5 @@
 #include "zip_encoding.hpp"
+#include "f7zip.h"
 #include <bit7z/bit7zlibrary.hpp>
 #include <bit7z/bitarchivereader.hpp>
 #include <bit7z/bitfilecompressor.hpp>
@@ -6,6 +7,7 @@
 #include <bit7z/bitarchiveeditor.hpp>
 #include <bit7z/bitexception.hpp>
 #include <bit7z/biterror.hpp>
+#include "internal/stringutil.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -33,6 +35,8 @@
 #include <iomanip>
 #include <deque>
 #include <fstream>
+#include <array>
+#include <CommonCrypto/CommonDigest.h>
 #include <sys/xattr.h>
 
 namespace localfs = std::filesystem;
@@ -42,6 +46,10 @@ struct Job {
     uint32_t codePage = 0;
     uint32_t filenameNormalization = 0;
     uint64_t volumeSize = 0;
+    std::string compressionMethod = "auto";
+    uint32_t dictionaryMiB = 0;
+    uint32_t threads = 0;
+    int32_t solidMiB = -1;
     uint32_t extractionPolicy = 0;
     std::string expectedDestinationVersion;
     std::string exportPath;
@@ -124,7 +132,15 @@ public:
     }
     ~StagingDirectory() {
         std::error_code ignored;
-        if (!preserve) localfs::remove_all(currentPath(), ignored);
+        if (!preserve) {
+            const auto current = currentPath();
+            struct stat opened{}, linked{};
+            // 描述符失去可用路径时，避免清理后来占用原名称的其他目录。
+            if (fstat(descriptor, &opened) == 0 && lstat(current.c_str(), &linked) == 0 &&
+                opened.st_dev == linked.st_dev && opened.st_ino == linked.st_ino && S_ISDIR(linked.st_mode)) {
+                localfs::remove_all(current, ignored);
+            }
+        }
         close(descriptor);
     }
 };
@@ -273,8 +289,8 @@ static std::string volumeFamily(const std::string& name) {
         if (std::regex_match(name, match, patterns[index])) {
             auto key = std::to_string(index) + ":" + match[1].str();
             std::transform(key.begin(), key.end(), key.begin(),
-                [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-            return key;
+                [](unsigned char value) { return static_cast<char>(value >= 'A' && value <= 'Z' ? value + ('a' - 'A') : value); });
+            return normalizeUnicodeName(key, 1);
         }
     }
     return {};
@@ -341,6 +357,8 @@ static std::string archiveItems(BitArchiveReader& reader, Job* job) {
         const auto modified = time.isFileTime()
             ? std::chrono::duration_cast<std::chrono::seconds>(time.getTimePoint().time_since_epoch()).count() : 0;
         const auto method = item.itemProperty(BitProperty::Method);
+        const auto comment = item.itemProperty(BitProperty::Comment);
+        const auto commented = item.itemProperty(BitProperty::Commented);
         std::ostringstream crc;
         if (!item.itemProperty(BitProperty::CRC).isEmpty()) crc << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << item.crc();
         out << "{\"index\":" << item.index() << ",\"path\":" << quote(item.path())
@@ -348,6 +366,8 @@ static std::string archiveItems(BitArchiveReader& reader, Job* job) {
             << ",\"directory\":" << (item.isDir() ? "true" : "false")
             << ",\"encrypted\":" << (item.isEncrypted() ? "true" : "false")
             << ",\"modified\":" << modified << ",\"method\":" << quote(method.isString() ? method.getString() : "")
+            << ",\"comment\":" << quote(comment.isString() ? comment.getString() : "")
+            << ",\"commented\":" << ((commented.isBool() && commented.getBool()) || (comment.isString() && !comment.getString().empty()) ? "true" : "false")
             << ",\"crc\":" << quote(crc.str()) << '}';
     }
     out << ']';
@@ -1097,8 +1117,12 @@ static std::vector<localfs::path> preparePublishedLinks(const localfs::path& sou
 static localfs::path publishExtraction(
     const localfs::path& source, const localfs::path& target, Job* job, StagingDirectory& staging,
     const localfs::path& archive, const struct stat& targetIdentity, ExtractionPermissions& permissions,
-    const std::string& archiveVolumes, const localfs::path& outputRelative = {}) {
+    const std::string& archiveVolumes, const localfs::path& outputRelative = {}, const struct stat* sourceIdentity = nullptr) {
     ExtractionDirectory stagedRoot(source);
+    if (sourceIdentity && (stagedRoot.identity.st_dev != sourceIdentity->st_dev || stagedRoot.identity.st_ino != sourceIdentity->st_ino)) {
+        throw std::runtime_error("暂存目录已变化，已停止发布");
+    }
+    stagedRoot.verify();
     auto directory = std::make_shared<ExtractionDirectory>(target);
     if (directory->identity.st_dev != targetIdentity.st_dev || directory->identity.st_ino != targetIdentity.st_ino) {
         throw std::runtime_error("解压期间目标目录已变化，请检查后重试");
@@ -1134,6 +1158,7 @@ static localfs::path publishExtraction(
         if (volumeVersion(archive.c_str()) != archiveVolumes) throw std::runtime_error("发布期间压缩包或分卷已变化，请重新打开");
         for (auto& move : moves) {
             checkCancellation(job);
+            stagedRoot.verify();
             move.directory->verify();
             struct stat current{};
             const int status = fstatat(move.directory->descriptor, move.name.c_str(), &current, AT_SYMLINK_NOFOLLOW);
@@ -1164,6 +1189,7 @@ static localfs::path publishExtraction(
             }
         }
         checkCancellation(job);
+        stagedRoot.verify();
         for (const auto& move : moves) move.directory->verify();
         for (const auto& link : publishedLinks) validateMaterializedLink(target / link, target);
         permissions.apply();
@@ -1194,10 +1220,198 @@ static localfs::path publishExtraction(
     return publishedOutput;
 }
 
-static void applyArchiveMutation(BitArchiveEditor& editor, const std::vector<BitArchiveItemInfo>& items,
+// 更新过程中同时检查文件与目录，目录时间可检测新增、删除和重命名。
+static std::string mutationSourceVersion(const localfs::path& source) {
+    struct stat info{};
+    if (lstat(source.c_str(), &info) != 0 || (!S_ISREG(info.st_mode) && !S_ISDIR(info.st_mode))) {
+        throw std::runtime_error("来源已变化或包含非普通文件，已停止处理");
+    }
+    return std::to_string(info.st_dev) + ":" + std::to_string(info.st_ino) + ":" +
+        std::to_string(info.st_mode) + ":" + std::to_string(info.st_size) + ":" +
+        std::to_string(info.st_mtimespec.tv_sec) + ":" + std::to_string(info.st_mtimespec.tv_nsec) + ":" +
+        std::to_string(info.st_ctimespec.tv_sec) + ":" + std::to_string(info.st_ctimespec.tv_nsec);
+}
+
+static void validateMutationSources(const std::map<std::string, std::string>& versions, Job* job) {
+    for (const auto& [source, version] : versions) {
+        checkCancellation(job);
+        if (mutationSourceVersion(source) != version) throw std::runtime_error("处理期间来源发生变化，已停止发布，请重试");
+    }
+}
+
+static std::array<uint64_t, 256> crcTable(uint64_t polynomial) {
+    std::array<uint64_t, 256> table{};
+    for (size_t index = 0; index < table.size(); ++index) {
+        uint64_t value = index;
+        for (int bit = 0; bit < 8; ++bit) value = (value >> 1) ^ ((value & 1) ? polynomial : 0);
+        table[index] = value;
+    }
+    return table;
+}
+
+static std::string hexDigest(uint64_t value, int width) {
+    std::ostringstream out;
+    out << std::uppercase << std::hex << std::setw(width) << std::setfill('0') << value;
+    return out.str();
+}
+
+static std::string checksumName(const std::string& value) {
+    std::string escaped;
+    for (const auto byte : value) {
+        if (byte == '\\') escaped += "\\\\";
+        else if (byte == '\n') escaped += "\\n";
+        else if (byte == '\r') escaped += "\\r";
+        else escaped += byte;
+    }
+    return escaped;
+}
+
+static std::string finishSha256(CC_SHA256_CTX& context) {
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(digest, &context);
+    std::ostringstream text;
+    for (const auto byte : digest) text << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned>(byte);
+    return text.str();
+}
+
+static std::string checksumFiles(Job* job, const std::string& operation, const char* archive,
+    const char* format, const char* directory, const char* const* inputs, int inputCount) {
+    if (inputCount < 1 || inputCount > 10000) throw std::runtime_error("请选择 1–10000 个普通文件进行校验");
+    const bool save = operation == "checksumSave";
+    const bool verify = operation == "checksumVerify";
+    const std::string algorithm(format);
+    if (save && algorithm != "sha256" && algorithm != "crc32" && algorithm != "crc64") {
+        throw std::runtime_error("不支持的校验清单算法");
+    }
+    static const auto crc32Table = crcTable(0xEDB88320);
+    static const auto crc64Table = crcTable(0xC96C5795D7870F42ULL);
+    std::map<std::string, std::string> versions;
+    localfs::path root;
+    if (verify) {
+        if (!directory[0]) throw std::runtime_error("请指定校验清单所在目录");
+        root = localfs::canonical(directory);
+        if (!localfs::is_directory(root)) throw std::runtime_error("清单目录不可用");
+        versions[root.string()] = mutationSourceVersion(root);
+    }
+    std::vector<localfs::path> files;
+    std::set<std::string> regularFiles;
+    uint64_t total = 0;
+    for (int index = 0; index < inputCount; ++index) {
+        checkCancellation(job);
+        const auto source = localfs::absolute(inputs[index]).lexically_normal();
+        if (verify) {
+            const auto relative = source.lexically_relative(root);
+            if (relative.empty() || relative.is_absolute() || *relative.begin() == ".." || localfs::weakly_canonical(source) != source) {
+                throw std::runtime_error("清单目标越过目录边界或使用了符号链接");
+            }
+            for (auto parent = source.parent_path(); parent != root && parent != parent.parent_path(); parent = parent.parent_path()) {
+                if (localfs::exists(parent)) versions.emplace(parent.string(), mutationSourceVersion(parent));
+            }
+        }
+        struct stat info{};
+        if (lstat(source.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) {
+            if (!verify) throw std::runtime_error("校验仅支持实际普通文件。" + source.string());
+            files.emplace_back(source);
+            continue;
+        }
+        versions[source.string()] = mutationSourceVersion(source);
+        regularFiles.insert(source.string());
+        if (static_cast<uint64_t>(info.st_size) > UINT64_MAX - total) throw std::runtime_error("所选文件总大小超出支持范围");
+        total += info.st_size;
+        files.emplace_back(source);
+    }
+    job->total = total;
+    const auto target = save ? localfs::canonical(localfs::path(archive).parent_path()) / localfs::path(archive).filename() : localfs::path();
+    std::string manifest = algorithm == "crc64" ? "# F7Zip CRC64/XZ\n" : "";
+    std::string response = "{\"ok\":true,\"files\":[";
+    bool first = true;
+    std::vector<unsigned char> buffer(1024 * 1024);
+    for (const auto& source : files) {
+        checkCancellation(job);
+        {
+            std::lock_guard<std::mutex> guard(job->mutex);
+            job->currentFile = source.string();
+        }
+        if (!first) response += ',';
+        first = false;
+        response += "{\"path\":" + quote(source.string());
+        if (!regularFiles.count(source.string())) {
+            response += ",\"error\":\"文件缺失或不是实际普通文件\"}";
+            continue;
+        }
+        const int descriptor = open(source.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+        if (descriptor < 0) {
+            if (!verify) throw std::runtime_error("无法读取校验文件。" + source.string());
+            response += ",\"error\":\"无法读取文件\"}";
+            continue;
+        }
+        uint32_t crc32 = UINT32_MAX;
+        uint64_t crc64 = UINT64_MAX;
+        CC_SHA256_CTX context;
+        CC_SHA256_Init(&context);
+        try {
+            struct stat info{};
+            if (fstat(descriptor, &info) != 0 || !S_ISREG(info.st_mode)) throw std::runtime_error("校验文件类型已变化");
+            while (true) {
+                checkCancellation(job);
+                const auto count = read(descriptor, buffer.data(), buffer.size());
+                if (count < 0 && errno == EINTR) continue;
+                if (count < 0) throw std::runtime_error("读取校验文件失败");
+                if (count == 0) break;
+                CC_SHA256_Update(&context, buffer.data(), static_cast<CC_LONG>(count));
+                for (ssize_t index = 0; index < count; ++index) {
+                    crc32 = static_cast<uint32_t>(crc32Table[(crc32 ^ buffer[index]) & 0xff]) ^ (crc32 >> 8);
+                    crc64 = crc64Table[(crc64 ^ buffer[index]) & 0xff] ^ (crc64 >> 8);
+                }
+                job->completed += count;
+            }
+        } catch (...) { close(descriptor); throw; }
+        close(descriptor);
+        const auto sha256 = finishSha256(context);
+        const auto crc32Value = hexDigest(crc32 ^ UINT32_MAX, 8);
+        const auto crc64Value = hexDigest(crc64 ^ UINT64_MAX, 16);
+        response += ",\"crc32\":" + quote(crc32Value) + ",\"crc64\":" + quote(crc64Value) +
+            ",\"sha256\":" + quote(sha256) + '}';
+        if (save) {
+            const auto relative = localfs::canonical(source).lexically_relative(target.parent_path());
+            if (relative.empty() || *relative.begin() == ".." || relative.is_absolute()) {
+                throw std::runtime_error("请将清单保存到全部校验文件的共同父目录或其上级目录");
+            }
+            const auto name = relative.generic_string();
+            const auto escaped = checksumName(name);
+            const auto hash = algorithm == "sha256" ? sha256 : algorithm == "crc32" ? crc32Value : crc64Value;
+            manifest += (escaped == name ? "" : "\\") + hash + " *" + escaped + "\n";
+            if (manifest.size() > 4 * 1024 * 1024) throw std::runtime_error("校验清单超过 4 MiB，请减少文件数量");
+        }
+    }
+    validateMutationSources(versions, job);
+    if (save) {
+        StagingDirectory staging(target.parent_path());
+        const auto output = staging.path / "checksums";
+        {
+            std::ofstream stream(output, std::ios::binary);
+            stream.write(manifest.data(), static_cast<std::streamsize>(manifest.size()));
+            stream.close();
+            if (!stream) throw std::runtime_error("无法完整写入校验清单");
+        }
+        const int descriptor = open(output.c_str(), O_RDONLY | O_NOFOLLOW);
+        if (descriptor < 0) throw std::runtime_error("无法校验清单写入结果");
+        const int flushed = fsync(descriptor);
+        close(descriptor);
+        if (flushed != 0) throw std::runtime_error("校验清单未能完整保存");
+        validateMutationSources(versions, job);
+        checkCancellation(job);
+        publish(output, target);
+        response += "],\"path\":" + quote(target.string()) + '}';
+    } else response += "]}";
+    return response;
+}
+
+static bool applyArchiveMutation(BitArchiveEditor& editor, const std::vector<BitArchiveItemInfo>& items,
     const std::string& action, const char* itemPath, const char* destination,
     const char* const* inputs, int inputCount, const localfs::path& archive, const localfs::path& staging, Job* job,
-    const std::map<std::string, std::string>& metadata) {
+    const std::map<std::string, std::string>& metadata,
+    std::map<std::string, std::string>& sourceVersions) {
     if (action == "update") {
         const auto original = std::find_if(items.begin(), items.end(), [&](const auto& item) { return item.path() == itemPath; });
         const auto edited = staging / "edited-data";
@@ -1225,7 +1439,7 @@ static void applyArchiveMutation(BitArchiveEditor& editor, const std::vector<Bit
                 editor.updateItem(found->index(), packed.string());
             }
         }
-        return;
+        return true;
     }
     std::map<std::string, const BitArchiveItemInfo*> existing;
     std::set<std::string> occupied;
@@ -1260,7 +1474,7 @@ static void applyArchiveMutation(BitArchiveEditor& editor, const std::vector<Bit
             }
         }
         if (!count) throw std::runtime_error("未找到需要删除的条目");
-        return;
+        return true;
     }
     if (action == "rename") {
         const auto from = logicalPath(itemPath);
@@ -1285,7 +1499,7 @@ static void applyArchiveMutation(BitArchiveEditor& editor, const std::vector<Bit
             }
         }
         if (!count) throw std::runtime_error("未找到需要重命名的条目");
-        return;
+        return true;
     }
     if (action == "mkdir") {
         const auto name = logicalPath(destination);
@@ -1294,9 +1508,13 @@ static void applyArchiveMutation(BitArchiveEditor& editor, const std::vector<Bit
         const auto empty = staging / "new-folder";
         localfs::create_directory(empty);
         editor.addItems(std::map<std::string, std::string>{{empty.string(), name}});
-        return;
+        return true;
     }
-    if (action != "add" && action != "addReplace") throw std::runtime_error("未知压缩包修改操作");
+    const bool newer = action == "updateNewer";
+    const bool freshen = action == "updateExisting";
+    const bool sync = action == "syncDirectory";
+    const bool updateMode = newer || freshen || sync;
+    if (action != "add" && action != "addReplace" && !updateMode) throw std::runtime_error("未知压缩包修改操作");
     if (inputCount <= 0) throw std::runtime_error("请选择需要添加的文件或文件夹");
     const auto prefix = logicalPath(itemPath, true);
     std::map<std::string, std::string> files;
@@ -1306,34 +1524,59 @@ static void applyArchiveMutation(BitArchiveEditor& editor, const std::vector<Bit
     std::set<std::string> directories;
     std::set<std::string> emptyNames;
     std::vector<std::string> conflicts;
+    std::set<std::string> desired;
+    std::set<std::string> synchronizedRoots;
     auto collect = [&](const localfs::path& source, const std::string& requested) {
         checkCancellation(job);
         const auto name = logicalPath(requested);
         checkParents(name);
         if (localfs::is_symlink(localfs::symlink_status(source))) throw std::runtime_error("添加暂不支持符号链接，请选择实际文件或目录");
         const bool directory = localfs::is_directory(source);
-        metadataSources[source.string()] = name;
+        if (updateMode) sourceVersions.emplace(source.string(), mutationSourceVersion(source));
+        if (!desired.insert(name).second) throw std::runtime_error("所选输入包含重复的目标名称");
         const auto found = existing.find(name);
         if (directory) {
             if (incoming.count(name)) throw std::runtime_error("所选输入的文件与目录同名");
             directories.insert(name);
             if (found != existing.end() && !found->second->isDir()) throw std::runtime_error("添加的目录与已有文件同名");
-            if (localfs::is_empty(source) && !occupied.count(name) && emptyNames.insert(name).second) emptyDirectories[source.string()] = name;
+            if (freshen && !occupied.count(name)) return;
+            if (localfs::is_empty(source) && (sync ? found == existing.end() : !occupied.count(name)) && emptyNames.insert(name).second) {
+                emptyDirectories[source.string()] = name;
+            }
         } else {
             if (!localfs::is_regular_file(source)) throw std::runtime_error("添加只支持普通文件和目录");
             if (directories.count(name)) throw std::runtime_error("所选输入的文件与目录同名");
             if (!incoming.insert(name).second) throw std::runtime_error("所选输入包含重复的目标文件名");
             if (occupied.count(name) && (found == existing.end() || found->second->isDir())) throw std::runtime_error("添加的文件与已有目录同名");
+            if (freshen && found == existing.end()) return;
+            if ((newer || freshen) && found != existing.end()) {
+                const auto time = found->second->itemProperty(BitProperty::MTime);
+                struct stat info{};
+                if (lstat(source.c_str(), &info) != 0) throw std::runtime_error("无法读取更新文件的时间");
+                if (time.isFileTime()) {
+                    const auto sourceTime = std::chrono::seconds(info.st_mtimespec.tv_sec) +
+                        std::chrono::nanoseconds(info.st_mtimespec.tv_nsec);
+                    const auto storedTime = time.getTimePoint().time_since_epoch();
+                    // ZIP 的 DOS 时间精度为两秒，7z 按引擎保存的时间精度比较。
+                    const bool unchanged = editor.format() == BitFormat::Zip
+                        ? info.st_mtimespec.tv_sec / 2 <= std::chrono::duration_cast<std::chrono::seconds>(storedTime).count() / 2
+                        : sourceTime <= storedTime;
+                    if (unchanged) return;
+                }
+            }
             if (found != existing.end()) conflicts.push_back(name);
             files[source.string()] = name;
         }
+        metadataSources[source.string()] = name;
     };
     for (int i = 0; i < inputCount; ++i) {
         const auto source = localfs::absolute(inputs[i]);
         if (localfs::is_symlink(localfs::symlink_status(source))) throw std::runtime_error("请选择实际文件或目录");
+        if (sync && !localfs::is_directory(source)) throw std::runtime_error("同步目录需要选择实际文件夹");
         const auto canonical = localfs::canonical(source);
         if (canonical == archive) throw std::runtime_error("不能将压缩包添加到自身");
         const auto rootName = (prefix.empty() ? "" : prefix + "/") + source.filename().string();
+        if (sync) synchronizedRoots.insert(rootName);
         if (localfs::is_directory(source)) {
             const auto relative = archive.lexically_relative(canonical);
             if (!relative.empty() && *relative.begin() != "..") throw std::runtime_error("所选目录包含当前压缩包，已停止递归添加");
@@ -1344,6 +1587,7 @@ static void applyArchiveMutation(BitArchiveEditor& editor, const std::vector<Bit
         } else collect(source, rootName);
     }
     if (!conflicts.empty() && action == "add") throw MutationConflict(std::move(conflicts));
+    size_t removed = 0;
     size_t metadataIndex = 0;
     for (const auto& [source, name] : metadataSources) {
         checkCancellation(job);
@@ -1351,8 +1595,8 @@ static void applyArchiveMutation(BitArchiveEditor& editor, const std::vector<Bit
         std::vector<std::string> oldAliases;
         for (const auto& [alias, target] : metadata) if (target == name) oldAliases.push_back(alias);
         if (packed.empty()) {
-            if (!localfs::is_directory(source) && action == "addReplace") {
-                for (const auto& alias : oldAliases) editor.deleteItem(existing.at(alias)->index());
+            if ((!localfs::is_directory(source) && action == "addReplace") || updateMode) {
+                for (const auto& alias : oldAliases) { editor.deleteItem(existing.at(alias)->index()); ++removed; }
             }
             continue;
         }
@@ -1362,15 +1606,73 @@ static void applyArchiveMutation(BitArchiveEditor& editor, const std::vector<Bit
             throw std::runtime_error("元数据条目与待添加文件或已有普通文件重名");
         }
         files[packed.string()] = alias;
-        for (size_t index = 1; index < oldAliases.size(); ++index) editor.deleteItem(existing.at(oldAliases[index])->index());
+        for (size_t index = 1; index < oldAliases.size(); ++index) { editor.deleteItem(existing.at(oldAliases[index])->index()); ++removed; }
     }
+    if (sync) {
+        for (const auto& [name, item] : existing) {
+            const auto sidecar = metadata.find(name);
+            const auto& logical = sidecar == metadata.end() ? name : sidecar->second;
+            if (selectedPath(logical, synchronizedRoots) && !desired.count(logical)) {
+                editor.deleteItem(item->index());
+                ++removed;
+            }
+        }
+    }
+    size_t stagedIndex = 0;
     for (const auto& [source, name] : files) {
+        auto input = source;
+        if (updateMode) {
+            const auto staged = staging / ("update-input-" + std::to_string(stagedIndex++));
+            if (copyfile(source.c_str(), staged.c_str(), nullptr, COPYFILE_ALL | COPYFILE_EXCL | COPYFILE_NOFOLLOW) != 0 ||
+                !localfs::is_regular_file(localfs::symlink_status(staged))) {
+                throw std::runtime_error("无法暂存更新文件，已保留原包");
+            }
+            input = staged.string();
+        }
         const auto found = existing.find(name);
-        if (found == existing.end()) editor.addFile(source, name);
-        else editor.updateItem(found->second->index(), source);
+        if (found == existing.end()) editor.addFile(input, name);
+        else editor.updateItem(found->second->index(), input);
     }
-    if (!emptyDirectories.empty()) editor.addItems(emptyDirectories);
+    if (!emptyDirectories.empty()) {
+        if (updateMode) {
+            std::map<std::string, std::string> stagedDirectories;
+            for (const auto& [source, name] : emptyDirectories) {
+                const auto staged = staging / ("update-directory-" + std::to_string(stagedIndex++));
+                localfs::create_directory(staged);
+                if (copyfile(source.c_str(), staged.c_str(), nullptr, COPYFILE_METADATA) != 0) {
+                    throw std::runtime_error("无法暂存更新目录属性");
+                }
+                stagedDirectories.emplace(staged.string(), name);
+            }
+            editor.addItems(stagedDirectories);
+        } else editor.addItems(emptyDirectories);
+    }
+    return !files.empty() || !emptyDirectories.empty() || removed != 0;
 }
+
+#include "file_parts_impl.hpp"
+#include "zip_repair_impl.hpp"
+#include "password_search_impl.hpp"
+#include "sfx_impl.hpp"
+
+// 仅请求条目属性更新，直接保留原有压缩数据和加密内容。
+class ZipCommentWriter final : public BitArchiveWriter {
+public:
+    ZipCommentWriter(const Bit7zLibrary& library, const std::string& path, const std::string& password,
+        uint32_t index, const std::string& comment)
+        : BitArchiveWriter(library, path, BitFormat::Zip, password), index_(index), comment_(bit7z::widen_archive_text(comment)) {}
+protected:
+    auto itemProperty(InputIndex index, BitProperty property) const -> BitPropVariant override {
+        if (static_cast<uint32_t>(index) == index_ && property == BitProperty::Comment) return BitPropVariant(comment_);
+        return inputArchive()->itemProperty(static_cast<uint32_t>(index), property);
+    }
+    auto hasNewProperties(uint32_t index) const noexcept -> bool override {
+        return indexInArchive(index) == index_;
+    }
+private:
+    uint32_t index_;
+    std::wstring comment_;
+};
 
 extern "C" {
 __attribute__((visibility("default"))) Job* f7_job_create() { return new Job(); }
@@ -1411,17 +1713,79 @@ __attribute__((visibility("default"))) char* f7_job_progress(Job* job) {
         ",\"file\":" + quote(job->currentFile) + "}");
 }
 
+// 独立校验 C ABI 参数，避免无效组合被底层静默忽略。
+static void compressionParameters(BitFileCompressor& compressor, const BitInOutFormat& format, int level, Job* job) {
+    const bool seven = format == BitFormat::SevenZip;
+    const bool zip = format == BitFormat::Zip;
+    if (level != 0 && level != 1 && level != 5 && level != 7 && level != 9) {
+        throw std::runtime_error("无效的压缩等级");
+    }
+    const std::map<std::string, BitCompressionMethod> methods = {
+        {"Copy", BitCompressionMethod::Copy}, {"Deflate", BitCompressionMethod::Deflate},
+        {"Deflate64", BitCompressionMethod::Deflate64}, {"BZip2", BitCompressionMethod::BZip2},
+        {"LZMA", BitCompressionMethod::Lzma}, {"LZMA2", BitCompressionMethod::Lzma2},
+        {"PPMd", BitCompressionMethod::Ppmd}
+    };
+    compressor.setCompressionLevel(static_cast<BitCompressionLevel>(level));
+    if (job->compressionMethod != "auto") {
+        const auto method = methods.find(job->compressionMethod);
+        if ((!seven && !zip) || level == 0 || method == methods.end()) {
+            throw std::runtime_error("当前格式或等级不支持所选压缩算法");
+        }
+        // bit7z 同时核对算法与格式兼容性，例如 ZIP 不支持 LZMA2。
+        compressor.setCompressionMethod(method->second);
+    }
+    const auto method = compressor.compressionMethod();
+    const bool dictionary = level != 0 && (method == BitCompressionMethod::Lzma ||
+        method == BitCompressionMethod::Lzma2 || method == BitCompressionMethod::Ppmd);
+    const std::set<uint32_t> dictionaries = {1, 4, 8, 16, 32, 64, 128, 256};
+    if (job->dictionaryMiB) {
+        if (!dictionary || !dictionaries.count(job->dictionaryMiB)) throw std::runtime_error("无效的字典大小或算法组合");
+        compressor.setDictionarySize(job->dictionaryMiB * (1u << 20));
+    }
+    if (job->threads > 64 || (job->threads && (format == BitFormat::Tar || format == BitFormat::GZip || format == BitFormat::Wim))) {
+        throw std::runtime_error("当前格式的线程参数无效");
+    }
+    compressor.setThreadsCount(job->threads);
+    const std::set<int32_t> blocks = {-1, 0, 16, 64, 256, 1024};
+    if (!blocks.count(job->solidMiB) || (job->solidMiB != -1 &&
+        (!seven || level == 0 || method == BitCompressionMethod::Copy))) {
+        throw std::runtime_error("当前格式或算法的固实块参数无效");
+    }
+    if (job->solidMiB == 0) compressor.setSolidMode(false);
+    if (job->solidMiB > 0) {
+        compressor.setSolidMode(true);
+        compressor.setFormatProperty(L"s", std::to_wstring(job->solidMiB) + L"m");
+    }
+}
+
+__attribute__((visibility("default"))) void f7_job_compression_parameters(
+    Job* job, const char* method, uint32_t dictionaryMiB, uint32_t threads, int32_t solidMiB) {
+    job->compressionMethod = method;
+    job->dictionaryMiB = dictionaryMiB;
+    job->threads = threads;
+    job->solidMiB = solidMiB;
+}
+
 // operation 为 list / extract / extractHere / extractSmart / export / test / compress，解压操作可加 Flat 后缀，所有字符串使用 UTF-8。
 __attribute__((visibility("default"))) char* f7_run(
     Job* job, const char* engine, const char* operation, const char* archive,
     const char* destination, const char* password, const char* format, int level,
     const char* const* inputs, int inputCount, const uint32_t* indices, int indexCount) {
     bool multiVolume = false;
+    PasswordTextScope passwordText;
     try {
         checkCancellation(job);
         if (job->filenameNormalization > 2) throw std::runtime_error("无效的 Unicode 文件名规范化选项");
         Bit7zLibrary library(engine);
         std::string op(operation);
+        if (op == "passwordSearch" || op == "passwordSearchInfo") return result(passwordSearch(job, library, engine, archive, inputs, inputCount, op == "passwordSearchInfo"));
+        if (op == "repairZip") return result(repairZip(job, library, engine, archive, destination, password));
+        if (op == "splitFile") return result(splitPlainFile(job, archive, destination));
+        if (op == "joinFile" || op == "partsInfo") return result(joinPlainFile(job, archive, destination, op == "partsInfo"));
+        if (op == "checksum" || op == "checksumSave" || op == "checksumVerify") {
+            return result(checksumFiles(job, op, archive, format, destination, inputs, inputCount));
+        }
         if (op == "trash") {
             if (!localfs::is_regular_file(localfs::symlink_status(archive))) throw std::runtime_error("符号链接来源保留原包，请在 Finder 中处理");
             const auto source = localfs::canonical(archive);
@@ -1461,7 +1825,10 @@ __attribute__((visibility("default"))) char* f7_run(
             if (localfs::exists(target)) throw std::runtime_error("目标文件已存在，请使用新文件名");
             const std::map<std::string, const BitInOutFormat*> formats = {
                 {"zip", &BitFormat::Zip}, {"zip-aes256", &BitFormat::Zip},
+                {"zipx", &BitFormat::Zip}, {"zipx-aes256", &BitFormat::Zip},
+                {"wim", &BitFormat::Wim},
                 {"7z", &BitFormat::SevenZip}, {"7z-visible", &BitFormat::SevenZip},
+                {"sfx", &BitFormat::SevenZip}, {"sfx-visible", &BitFormat::SevenZip},
                 {"tar", &BitFormat::Tar}, {"gz", &BitFormat::GZip},
                 {"xz", &BitFormat::Xz}, {"bz2", &BitFormat::BZip2},
                 {"tar.gz", &BitFormat::GZip}, {"tar.bz2", &BitFormat::BZip2},
@@ -1470,6 +1837,10 @@ __attribute__((visibility("default"))) char* f7_run(
             const auto found = formats.find(format);
             if (found == formats.end()) throw std::runtime_error("不支持的压缩格式");
             const auto& outputFormat = *found->second;
+            const bool sfx = std::string(format) == "sfx" || std::string(format) == "sfx-visible";
+            if (sfx) passwordText.useUtf16();
+            if (sfx && job->volumeSize) throw std::runtime_error("Windows SFX 创建使用单个 EXE 文件");
+            if (sfx && !std::set<std::string>{"auto", "Copy", "LZMA", "LZMA2", "PPMd"}.count(job->compressionMethod)) throw std::runtime_error("SFX 模块支持 LZMA2、LZMA、PPMd 或仅存储");
             if (job->volumeSize && outputFormat != BitFormat::Zip && outputFormat != BitFormat::SevenZip) {
                 throw std::runtime_error("分卷创建仅支持 ZIP 和 7z");
             }
@@ -1496,19 +1867,40 @@ __attribute__((visibility("default"))) char* f7_run(
                 }
                 paths.push_back(source.string());
             }
+            std::map<std::string, std::string> sfxSources;
+            struct stat sfxParent{};
+            if (sfx) {
+                if (stat(target.parent_path().c_str(), &sfxParent) != 0) throw std::runtime_error("无法检查 SFX 输出目录");
+                for (const auto& source : paths) {
+                    sfxSources.emplace(source, mutationSourceVersion(source));
+                    if (localfs::is_directory(source)) {
+                        for (const auto& entry : localfs::recursive_directory_iterator(source)) {
+                            checkCancellation(job);
+                            sfxSources.emplace(entry.path().string(), mutationSourceVersion(entry.path()));
+                        }
+                    }
+                }
+            }
             StagingDirectory staging(target.parent_path());
             const auto packedInputs = singleFile ? std::vector<std::pair<std::string, std::string>>{
                 {paths.front(), normalizeUnicodeName(localfs::path(paths.front()).filename().string(), job->filenameNormalization)}} :
                 compressionInputs(paths, staging.path, tarStream || outputFormat == BitFormat::Tar, job);
+            if (sfx) validateSfxInputs(packedInputs);
             const bool sevenZip = outputFormat == BitFormat::SevenZip;
             BitFileCompressor compressor(library, outputFormat);
+            const bool zipx = std::string(format) == "zipx" || std::string(format) == "zipx-aes256";
+            if (zipx && !std::set<std::string>{"auto", "Copy", "LZMA", "BZip2", "PPMd"}.count(job->compressionMethod)) {
+                throw std::runtime_error("ZIPX 创建支持 LZMA、BZip2、PPMd 或仅存储");
+            }
+            if (zipx && job->compressionMethod == "auto" && level != 0) compressor.setCompressionMethod(BitCompressionMethod::Lzma);
+            if (outputFormat == BitFormat::Wim && (level != 0 || job->threads != 0)) throw std::runtime_error("WIM 当前仅支持存储，等级和线程必须为 0");
             callbacks(compressor, job);
             compressor.setStoreSymbolicLinks(true);
-            compressor.setCompressionLevel(static_cast<BitCompressionLevel>(level));
-            if (password[0]) compressor.setPassword(password, sevenZip && std::string(format) != "7z-visible");
-            if (std::string(format) == "zip-aes256") compressor.setFormatProperty(L"em", L"AES256");
+            compressionParameters(compressor, outputFormat, level, job);
+            if (password[0]) compressor.setPassword(password, sevenZip && std::string(format) != "7z-visible" && std::string(format) != "sfx-visible");
+            if (std::string(format) == "zip-aes256" || std::string(format) == "zipx-aes256") compressor.setFormatProperty(L"em", L"AES256");
             compressor.setVolumeSize(job->volumeSize);
-            const auto output = job->volumeSize ? staging.path / "volumes" / target.filename() :
+            auto output = job->volumeSize ? staging.path / "volumes" / target.filename() :
                 staging.path / (std::string("archive.") + (tarStream ? "tar." : "") + outputFormat.extension());
             if (job->volumeSize) localfs::create_directory(output.parent_path());
             if (tarStream) {
@@ -1522,10 +1914,18 @@ __attribute__((visibility("default"))) char* f7_run(
             }
             if (tarStream) compressor.compress(paths, output.string());
             else compressInputs(compressor, packedInputs, output, job);
+            if (sfx) output = createSfx(output, staging, engine, library, password, job);
             checkCancellation(job);
             // 发布期间锁住目标目录，避免本程序并发创建的卷组交错。
             ArchiveLock directoryLock(localfs::canonical(target.parent_path()).c_str());
             checkCancellation(job);
+            if (sfx) {
+                validateMutationSources(sfxSources, job);
+                struct stat current{};
+                if (fstat(directoryLock.descriptor, &current) != 0 || current.st_dev != sfxParent.st_dev || current.st_ino != sfxParent.st_ino) {
+                    throw std::runtime_error("SFX 输出目录已变化，请重新选择");
+                }
+            }
             checkOutputGroup(target);
             if (job->volumeSize) publishContents(output.parent_path(), target.parent_path(), job);
             else publish(output, target);
@@ -1557,9 +1957,11 @@ __attribute__((visibility("default"))) char* f7_run(
         ZipEncodingScope encoding(engine, archive, job->codePage);
         // 展开封装层后，浏览、选中解压与测试共用同一内层归档和索引。
         std::vector<std::unique_ptr<StagingDirectory>> intermediates;
-        auto opened = std::make_unique<BitArchiveReader>(library, archive, BitFormat::Auto, password);
+        bool sfx = false;
+        auto opened = openArchiveForReading(library, archive, password, job, sfx, passwordText);
         callbacks(*opened, job);
         multiVolume = opened->isMultiVolume();
+        if (sfx && multiVolume) throw std::runtime_error("自解压包当前支持单卷读取，请先整理分卷");
         const auto volumeCount = opened->volumesCount();
         validateVolumes(*opened);
         localfs::path readPath = archive;
@@ -1592,8 +1994,9 @@ __attribute__((visibility("default"))) char* f7_run(
             const bool containsLinks = std::any_of(entries.begin(), entries.end(), [](const auto& item) {
                 return item.isSymLink() || !item.itemProperty(BitProperty::HardLink).isEmpty();
             });
-            const bool editable = !multiVolume && !containsLinks && (reader.detectedFormat() == BitFormat::Zip || reader.detectedFormat() == BitFormat::SevenZip);
+            const bool editable = !sfx && !multiVolume && !containsLinks && (reader.detectedFormat() == BitFormat::Zip || reader.detectedFormat() == BitFormat::SevenZip);
             return result("{\"ok\":true,\"codePage\":" + std::to_string(encoding.codePage()) + ",\"volumes\":" + std::to_string(volumeCount) + ",\"version\":" + quote(readVersion) +
+                ",\"commentEditable\":" + (editable && reader.detectedFormat() == BitFormat::Zip ? "true" : "false") +
                 ",\"editable\":" + (editable ? "true" : "false") + ",\"comment\":" + quote(archiveComment(reader)) + ",\"items\":" + items + "}");
         }
         if (op == "test") {
@@ -1717,6 +2120,7 @@ static char* mutateArchive(
     const char* const* inputs, int inputCount) {
     try {
         checkCancellation(job);
+        if (hasSfxPrefix(archive)) throw std::runtime_error("自解压包为只读，请创建新的归档");
         const auto target = localfs::canonical(archive);
         ArchiveLock lock(target.c_str());
         if (access(target.c_str(), W_OK) != 0) throw std::runtime_error("压缩包为只读，编辑文件已保留");
@@ -1790,7 +2194,22 @@ static char* mutateArchive(
             throw std::runtime_error("读取期间备份文件发生变化，已停止恢复");
         }
         if (archiveVersion(archive) != expected) throw std::runtime_error("复制期间原压缩包发生变化，已停止更新");
-        if (action != "restore") {
+        std::map<std::string, std::string> sourceVersions;
+        const bool editingComment = action == "fileComment" || action == "archiveComment";
+        if (editingComment) {
+            if (sevenZip) throw std::runtime_error("当前仅支持编辑 ZIP 注释");
+            if (strlen(editedFile) > 16384) throw std::runtime_error("注释最多支持 16384 个 UTF-8 字节");
+            if (action == "archiveComment") replaceZipArchiveComment(modified.string(), editedFile);
+            else {
+                const auto entry = std::find_if(originalItems.begin(), originalItems.end(),
+                    [&](const auto& item) { return item.path() == itemPath; });
+                if (entry == originalItems.end() || std::count_if(originalItems.begin(), originalItems.end(),
+                    [&](const auto& item) { return item.path() == itemPath; }) != 1) throw std::runtime_error("条目缺失或存在重名，已停止编辑注释");
+                ZipCommentWriter writer(library, modified.string(), password, entry->index(), editedFile);
+                callbacks(writer, job);
+                writer.compressTo(modified.string());
+            }
+        } else if (action != "restore") {
             BitArchiveEditor editor(library, modified.string(), sevenZip ? BitFormat::SevenZip : BitFormat::Zip, password);
             callbacks(editor, job);
             editor.setPassword(encrypted || cryptHeaders ? password : "", cryptHeaders);
@@ -1800,7 +2219,15 @@ static char* mutateArchive(
                 if (encryptionMethod.find("AES-192") != std::string::npos) method = L"AES192";
                 editor.setFormatProperty(L"em", method);
             }
-            applyArchiveMutation(editor, originalItems, action, itemPath, editedFile, inputs, inputCount, target, staging.path, job, originalMetadata);
+            const bool changed = applyArchiveMutation(editor, originalItems, action, itemPath, editedFile, inputs, inputCount,
+                target, staging.path, job, originalMetadata, sourceVersions);
+            validateMutationSources(sourceVersions, job);
+            if (!changed) {
+                if (archiveVersion(archive) != expected) throw std::runtime_error("更新期间原压缩包发生变化");
+                BitArchiveReader unchanged(library, archive, BitFormat::Auto, password);
+                return result("{\"ok\":true,\"editable\":true,\"version\":" + quote(expected) +
+                    ",\"comment\":" + quote(archiveComment(unchanged)) + ",\"items\":" + archiveItems(unchanged, job) + "}");
+            }
             editor.applyChanges();
         }
         std::string items;
@@ -1809,6 +2236,18 @@ static char* mutateArchive(
             BitArchiveReader verified(library, modified.string(), BitFormat::Auto, password);
             callbacks(verified, job);
             verified.test();
+            if (editingComment) {
+                const auto entries = verified.items();
+                if (entries.size() != originalItems.size()) throw std::runtime_error("注释修改改变了条目数量，已保留原包");
+                for (size_t index = 0; index < entries.size(); ++index) {
+                    const auto& before = originalItems[index];
+                    const auto& after = entries[index];
+                    if (before.path() != after.path() || before.size() != after.size() || before.isDir() != after.isDir() ||
+                        before.isEncrypted() != after.isEncrypted() || (!before.isDir() && before.crc() != after.crc())) {
+                        throw std::runtime_error("注释修改改变了文件内容或加密状态，已保留原包");
+                    }
+                }
+            }
             if ((verified.detectedFormat() == BitFormat::SevenZip) != sevenZip ||
                 (!sevenZip && verified.detectedFormat() != BitFormat::Zip)) {
                 throw std::runtime_error("备份与原压缩包格式不一致");
@@ -1848,6 +2287,7 @@ static char* mutateArchive(
         if (archiveVersion(archive) != expected || archiveVersion(target.c_str()) != expected) {
             throw std::runtime_error("更新期间原压缩包发生变化，已保留编辑文件");
         }
+        validateMutationSources(sourceVersions, job);
         // 从此处开始即使发布失败也保留备份，便于手动恢复。
         backup.preserve = true;
         if (rename(modified.c_str(), target.c_str()) != 0) {

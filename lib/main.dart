@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
@@ -18,6 +19,9 @@ import 'app_settings.dart';
 import 'edit_workspace.dart';
 import 'app_theme.dart';
 import 'compression_preset.dart';
+import 'compression_parameters.dart';
+import 'checksum_dialog.dart';
+import 'password_recovery_dialog.dart';
 
 const _desktop = MethodChannel('sevenzip/desktop');
 
@@ -75,6 +79,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   String _archiveVersion = '';
   String _archiveComment = '';
   bool _editable = false;
+  bool _commentEditable = false;
   bool _openingFile = false;
   bool _tryingPasswords = false;
   final Map<String, String> _operationPasswords = {};
@@ -99,6 +104,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   double? _progress;
   bool _busy = false;
   bool _choosing = false;
+  bool _checksumDialogOpen = false;
   bool _dragging = false;
   bool _cancelling = false;
   List<ArchiveEntry> _entries = [];
@@ -129,7 +135,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   bool get _available => _engineAvailable && !_exportingDrag;
 
   bool get _interactive =>
-      _available && !_openingFile && !_mutating && !_tryingPasswords;
+      _available &&
+      !_openingFile &&
+      !_mutating &&
+      !_tryingPasswords &&
+      !_checksumDialogOpen;
 
   @override
   void initState() {
@@ -706,10 +716,23 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     });
     try {
       final result = await _engine!.run(request);
-      _operationPasswords.remove(request.archive);
-      _operationPasswords[request.archive] = request.password;
-      if (_operationPasswords.length > 32) {
-        _operationPasswords.remove(_operationPasswords.keys.first);
+      if (!const {
+        'checksum',
+        'checksumSave',
+        'checksumVerify',
+        'splitFile',
+        'joinFile',
+        'partsInfo',
+        'passwordSearch',
+        'passwordSearchInfo',
+        'repairZip',
+        'trash',
+      }.contains(request.operation)) {
+        _operationPasswords.remove(request.archive);
+        _operationPasswords[request.archive] = request.password;
+        if (_operationPasswords.length > 32) {
+          _operationPasswords.remove(_operationPasswords.keys.first);
+        }
       }
       if (mounted) {
         setState(() {
@@ -1031,6 +1054,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         _archiveVersion = result['version'] as String;
         _archiveComment = result['comment'] as String? ?? '';
         _editable = !nested && result['editable'] == true;
+        _commentEditable = !nested && result['commentEditable'] == true;
         _entries = items;
         _tree = buildArchiveTree(items);
         _folder = '';
@@ -1347,14 +1371,15 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     try {
       destination = await _desktop.invokeMethod<String>(
         'saveArchive',
-        '${p.basenameWithoutExtension(inputs.first)}.${options.format}',
+        '${p.basenameWithoutExtension(inputs.first)}.${options.format == 'sfx' ? 'exe' : options.format}',
       );
     } finally {
       if (mounted) setState(() => _choosing = false);
     }
     if (destination == null || !mounted) return false;
-    if (!destination.toLowerCase().endsWith('.${options.format}')) {
-      destination += '.${options.format}';
+    final extension = options.format == 'sfx' ? 'exe' : options.format;
+    if (!destination.toLowerCase().endsWith('.$extension')) {
+      destination += '.$extension';
     }
     try {
       final result = await _run(
@@ -1363,12 +1388,16 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
           'compress',
           destination,
           inputs: inputs,
-          format: options.format == 'zip' && options.encryption == 'AES256'
-              ? 'zip-aes256'
-              : options.format == '7z' && !options.encryptNames
-              ? '7z-visible'
+          format:
+              const {'zip', 'zipx'}.contains(options.format) &&
+                  options.encryption == 'AES256'
+              ? '${options.format}-aes256'
+              : const {'7z', 'sfx'}.contains(options.format) &&
+                    !options.encryptNames
+              ? '${options.format}-visible'
               : options.format,
           level: options.level,
+          parameters: options.parameters,
           volumeSize: options.volumeSize,
           password: options.password,
         ),
@@ -1390,6 +1419,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     if (paths.length == 1 &&
         (const [
               '.zip',
+              '.exe',
               '.7z',
               '.rar',
               '.tar',
@@ -1504,7 +1534,12 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     String destination = '',
   }) async {
     if (!_interactive || !_editable || _archive == null) return false;
-    if (operation == 'restore' &&
+    if (const {
+          'restore',
+          'updateNewer',
+          'updateExisting',
+          'syncDirectory',
+        }.contains(operation) &&
         (_edits?.sessions.any((session) => session.archive == _archive) ??
             false)) {
       await _error('此压缩包正在外部编辑，请先在“管理编辑文件”中结束全部监控');
@@ -1530,6 +1565,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
             'rename': '重命名',
             'mkdir': '新建文件夹',
             'restore': '恢复原包备份',
+            'updateNewer': '按时间更新',
+            'updateExisting': '仅更新已有条目',
+            'syncDirectory': '同步目录',
+            'fileComment': '编辑文件注释',
+            'archiveComment': '编辑归档注释',
           };
           final result = await _run(
             labels[action]!,
@@ -1626,6 +1666,379 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     if (paths.isNotEmpty && mounted) {
       await _mutateArchive('add', inputs: paths, item: _folder);
     }
+  }
+
+  Future<void> _recoverPassword() async {
+    if (!_interactive) return;
+    setState(() => _mutating = true);
+    try {
+      final paths = await _choose('openArchive');
+      if (paths.isEmpty || !mounted) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => PasswordRecoveryDialog(
+          archive: paths.single,
+          codePage: _preferences.filenameEncoding.codePage,
+          run: (request) => _runOnce('搜索归档密码', request),
+          cancel: () => _engine?.cancel(),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _mutating = false);
+    }
+  }
+
+  Future<void> _repairZip() async {
+    if (!_interactive) return;
+    setState(() => _mutating = true);
+    try {
+      final paths = await _choose('openArchive');
+      if (paths.isEmpty || !mounted) return;
+      if (!await _confirm(
+            '修复 ZIP 到新文件',
+            '扫描小于 4 GiB 的经典单卷 ZIP，逐项校验后重建目录，原包保留。\n'
+                'ZIP64 暂不支持。损坏、越界及重复条目会跳过，单项最多 512 MiB、总量最多 2 GiB。\n'
+                '仅中央目录记录的注释、权限和链接属性无法恢复，加密数据保持原样并需要密码验证。',
+          ) ||
+          !mounted) {
+        return;
+      }
+      setState(() => _choosing = true);
+      String? output;
+      try {
+        output = await _desktop.invokeMethod<String>(
+          'saveArchive',
+          '${p.basenameWithoutExtension(paths.single)}-repaired.zip',
+        );
+      } finally {
+        if (mounted) setState(() => _choosing = false);
+      }
+      if (output == null || !mounted) return;
+      var password = _operationPasswords[paths.single] ?? '';
+      while (mounted) {
+        try {
+          final result = await _run(
+            '扫描并修复 ZIP',
+            ArchiveRequest(
+              'repairZip',
+              paths.single,
+              destination: output,
+              password: password,
+              codePage: _preferences.filenameEncoding.codePage,
+            ),
+          );
+          if (result == null || !mounted) return;
+          setState(() {
+            _lastOutput = result['path'] as String;
+            _status =
+                'ZIP 修复完成 · 恢复 ${result['recovered']} 项，跳过 ${result['rejected']} 项';
+          });
+          final skipped = result['skipped'] as List;
+          if (skipped.isNotEmpty) {
+            await _error(
+              '已保存修复结果，以下候选未通过检查（最多显示 20 项）\n\n'
+              '${skipped.take(20).map((item) => '${item['entry']}\n${item['error']}').join('\n\n')}',
+            );
+          }
+          return;
+        } on ArchiveFailure catch (error) {
+          if (!error.passwordRequired) rethrow;
+          final value = await _askPassword(error: error.message);
+          if (value == null || !mounted) return;
+          password = value;
+        }
+      }
+    } catch (error) {
+      await _error(error);
+    } finally {
+      if (mounted) setState(() => _mutating = false);
+    }
+  }
+
+  Future<void> _filePartsTool({required bool join}) async {
+    if (!_interactive) return;
+    setState(() => _mutating = true);
+    try {
+      if (join) {
+        await _joinPlainFile();
+      } else {
+        await _splitPlainFile();
+      }
+    } finally {
+      if (mounted) setState(() => _mutating = false);
+    }
+  }
+
+  Future<void> _splitPlainFile() async {
+    final paths = await _choose('openArchive');
+    if (paths.isEmpty || !mounted) return;
+    final controller = TextEditingController(text: '100');
+    final size = await showDialog<int>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, refresh) {
+          final mib = int.tryParse(controller.text.trim());
+          final valid = mib != null && mib >= 1 && mib <= 2097151;
+          return AlertDialog(
+            title: const Text('分割普通文件'),
+            content: SizedBox(
+              width: 440,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(p.basename(paths.single)),
+                  const SizedBox(height: 12),
+                  TextField(
+                    key: const ValueKey('filePartSize'),
+                    controller: controller,
+                    keyboardType: TextInputType.number,
+                    onChanged: (_) => refresh(() {}),
+                    decoration: InputDecoration(
+                      labelText: '每片大小（MiB）',
+                      errorText: valid ? null : '请输入 1–2097151 的整数',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    '生成 .001、.002 等分片及 SHA-256 清单，合并时需要完整分片和清单，最多 10000 片。',
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: valid
+                    ? () => Navigator.pop(context, mib * 1048576)
+                    : null,
+                child: const Text('选择输出名称'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    Future<void>.delayed(const Duration(seconds: 1), controller.dispose);
+    if (size == null || !mounted) return;
+    setState(() => _choosing = true);
+    String? output;
+    try {
+      output = await _desktop.invokeMethod<String>(
+        'saveArchive',
+        '${p.basename(paths.single)}.part',
+      );
+    } finally {
+      if (mounted) setState(() => _choosing = false);
+    }
+    if (output == null || !mounted) return;
+    try {
+      final result = await _runOnce(
+        '分割文件',
+        ArchiveRequest(
+          'splitFile',
+          paths.single,
+          destination: output,
+          volumeSize: size,
+        ),
+      );
+      if (result != null && mounted) {
+        setState(() {
+          _lastOutput = result['path'] as String;
+          _status = '文件分割完成 · ${result['count']} 片，已保存校验清单';
+        });
+      }
+    } catch (error) {
+      await _error(error);
+    }
+  }
+
+  Future<void> _joinPlainFile() async {
+    final paths = await _choose('openArchive');
+    if (paths.isEmpty || !mounted) return;
+    try {
+      final info = await _runOnce(
+        '读取分片清单',
+        ArchiveRequest('partsInfo', paths.single),
+      );
+      if (info == null || !mounted) return;
+      if (!await _confirm(
+            '合并普通文件',
+            '${info['name']} · ${info['count']} 片 · ${_size(info['size'] as int)}\n'
+                '将逐片校验顺序、大小和 SHA-256，再保存合并结果。',
+          ) ||
+          !mounted) {
+        return;
+      }
+      setState(() => _choosing = true);
+      String? output;
+      try {
+        output = await _desktop.invokeMethod<String>(
+          'saveArchive',
+          info['name'] as String,
+        );
+      } finally {
+        if (mounted) setState(() => _choosing = false);
+      }
+      if (output == null || !mounted) return;
+      final result = await _runOnce(
+        '合并文件',
+        ArchiveRequest(
+          'joinFile',
+          paths.single,
+          destination: output,
+          expectedVersion: info['version'] as String,
+        ),
+      );
+      if (result != null && mounted) {
+        setState(() {
+          _lastOutput = result['path'] as String;
+          _status = '文件合并完成 · SHA-256 一致';
+        });
+      }
+    } catch (error) {
+      await _error(error);
+    }
+  }
+
+  Future<void> _editComment({bool archive = false}) async {
+    if (!_interactive || !_commentEditable) return;
+    final entry = archive ? null : _selectedFile;
+    if (!archive && entry == null) return;
+    final controller = TextEditingController(
+      text: archive ? _archiveComment : entry!.comment,
+    );
+    final comment = await showDialog<String>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, refresh) {
+          final size = utf8.encode(controller.text).length;
+          final valid = size <= 16384 && !controller.text.contains('\x00');
+          return AlertDialog(
+            title: Text(archive ? '编辑归档注释' : '编辑文件注释'),
+            content: SizedBox(
+              width: 480,
+              child: TextField(
+                key: const ValueKey('archiveCommentText'),
+                controller: controller,
+                minLines: 3,
+                maxLines: 8,
+                autofocus: true,
+                onChanged: (_) => refresh(() {}),
+                decoration: InputDecoration(
+                  labelText: archive ? 'ZIP 归档注释' : entry!.path,
+                  helperText: '$size / 16384 UTF-8 字节，留空可清除注释',
+                  errorText: valid ? null : '注释超出长度限制或含空字符',
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: valid
+                    ? () => Navigator.pop(context, controller.text)
+                    : null,
+                child: const Text('保存注释'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    Future<void>.delayed(const Duration(seconds: 1), controller.dispose);
+    if (comment == null || !mounted) return;
+    await _mutateArchive(
+      archive ? 'archiveComment' : 'fileComment',
+      item: entry?.path ?? '',
+      destination: comment,
+    );
+  }
+
+  Future<void> _showChecksums() async {
+    if (!_interactive) return;
+    setState(() => _checksumDialogOpen = true);
+    try {
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => ChecksumDialog(
+          archive: _archiveParents.isEmpty ? _archive : null,
+          run: (task, request) => _runOnce(task, request),
+          cancel: () => _engine?.cancel(),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _checksumDialogOpen = false);
+    }
+  }
+
+  Future<void> _updateArchive() async {
+    if (!_interactive || !_editable || _archive == null) return;
+    if (_edits?.sessions.any((session) => session.archive == _archive) ??
+        false) {
+      await _error('此压缩包正在外部编辑，请先在“管理编辑文件”中结束全部监控');
+      return;
+    }
+    final mode = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('更新模式'),
+        children: [
+          for (final (value, title, description) in [
+            ('updateNewer', '按时间更新', '添加新条目，替换来源修改时间较新的文件。'),
+            ('updateExisting', '仅更新已有条目', '只替换已有且来源修改时间较新的文件。'),
+            ('syncDirectory', '同步目录', '以所选文件夹为准，替换对应目录内容并删除来源中已不存在的条目。'),
+          ])
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, value),
+              child: SizedBox(
+                width: 390,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title),
+                      const SizedBox(height: 4),
+                      Text(description, style: const TextStyle(fontSize: 12)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (mode == null || !mounted) return;
+    final paths = await _choose('chooseInputs');
+    if (paths.isEmpty || !mounted) return;
+    if (mode == 'syncDirectory') {
+      if (paths.any(
+        (path) =>
+            FileSystemEntity.typeSync(path, followLinks: false) !=
+            FileSystemEntityType.directory,
+      )) {
+        await _error('同步目录需要选择实际文件夹');
+        return;
+      }
+      if (!await _confirm(
+            '确认同步目录',
+            '将在包内 ${_folder.isEmpty ? '根目录' : _folder} 下同步以下同名文件夹。'
+                '对应目录内的文件将以来源为准，来源中已不存在的条目会被删除。'
+                '修改前会完整备份原包。\n\n${paths.map(p.basename).join('\n')}',
+          ) ||
+          !mounted) {
+        return;
+      }
+    }
+    await _mutateArchive(mode, inputs: paths, item: _folder);
   }
 
   Future<void> _removeSelected() async {
@@ -1773,6 +2186,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       _archiveVersion = '';
       _archiveComment = '';
       _editable = false;
+      _commentEditable = false;
       _folder = '';
       _navigation
         ..clear()
@@ -1801,6 +2215,30 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         break;
       case 'add':
         await _addFiles();
+        break;
+      case 'splitFile':
+        await _filePartsTool(join: false);
+        break;
+      case 'repairZip':
+        await _repairZip();
+        break;
+      case 'recoverPassword':
+        await _recoverPassword();
+        break;
+      case 'joinFile':
+        await _filePartsTool(join: true);
+        break;
+      case 'fileComment':
+        await _editComment();
+        break;
+      case 'archiveComment':
+        await _editComment(archive: true);
+        break;
+      case 'checksums':
+        await _showChecksums();
+        break;
+      case 'updateMode':
+        await _updateArchive();
         break;
       case 'extract':
         await _extract();
@@ -1881,6 +2319,10 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         '压缩方法': entry.method,
         'CRC32': entry.crc,
         '加密': entry.encrypted ? '是' : '否',
+        if (entry.comment.isNotEmpty || entry.commented)
+          '注释': entry.comment.isNotEmpty
+              ? entry.comment
+              : '此条目包含注释，文本不可用（格式不支持或校验失败）',
       },
     };
     await showDialog<void>(
@@ -3044,6 +3486,29 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               child: const Text('新建文件夹…'),
             ),
             PopupMenuItem(
+              value: 'fileComment',
+              enabled: _commentEditable && _selectedFile != null,
+              child: const Text('编辑文件注释…'),
+            ),
+            PopupMenuItem(
+              value: 'archiveComment',
+              enabled: _commentEditable,
+              child: const Text('编辑归档注释…'),
+            ),
+            const PopupMenuItem(value: 'splitFile', child: Text('分割普通文件…')),
+            const PopupMenuItem(value: 'joinFile', child: Text('合并分片…')),
+            const PopupMenuItem(value: 'repairZip', child: Text('修复 ZIP…')),
+            const PopupMenuItem(
+              value: 'recoverPassword',
+              child: Text('自有归档密码恢复…'),
+            ),
+            const PopupMenuItem(value: 'checksums', child: Text('校验工具…')),
+            PopupMenuItem(
+              value: 'updateMode',
+              enabled: _editable && _archive != null,
+              child: const Text('更新模式…'),
+            ),
+            PopupMenuItem(
               value: 'restore',
               enabled: _editable && _archive != null,
               child: const Text('恢复原包备份…'),
@@ -4130,7 +4595,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
         content: const SizedBox(
           width: 400,
           child: SelectableText(
-            '开源 macOS 压缩工具\n\nFlutter 界面 · 7-Zip 26.06 原生引擎\nbit7z 4.0.10 C++ 封装\n\nF7Zip 使用 MIT 许可证。\n7-Zip 遵循 LGPL、BSD 及 unRAR 限制。\nbit7z 遵循 MPL-2.0。\n\n支持 ZIP / 7z / TAR / GZIP / XZ / BZIP2 创建，ZIP / 7z 编辑回写，多格式浏览与解压。',
+            '开源跨平台桌面压缩工具\n\nFlutter 界面 · 7-Zip 26.06 原生引擎\nbit7z 4.0.10 C++ 封装\n\nF7Zip 使用 MIT 许可证。\n7-Zip 遵循 LGPL、BSD 及 unRAR 限制。\nbit7z 遵循 MPL-2.0。\n\n支持 ZIP / ZIPX / 7z / Windows SFX / WIM / TAR / GZIP / XZ / BZIP2 创建，ZIP / 7z 编辑回写，多格式浏览与解压。',
           ),
         ),
         actions: [
@@ -4193,6 +4658,7 @@ class _CompressionOptions {
     this.volumeSize = 0,
     this.encryption = 'AES256',
     this.encryptNames = true,
+    this.parameters = const CompressionParameters(),
   });
   final String format;
   final int level;
@@ -4200,6 +4666,7 @@ class _CompressionOptions {
   final int volumeSize;
   final String encryption;
   final bool encryptNames;
+  final CompressionParameters parameters;
 }
 
 class _CompressionDialog extends StatefulWidget {
@@ -4220,7 +4687,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
   String _volume = 'none';
   final _customVolume = TextEditingController();
   int? get _volumeSize {
-    if (!_supportsPassword || _volume == 'none') return 0;
+    if (!_supportsVolumes || _volume == 'none') return 0;
     final mib = int.tryParse(
       _volume == 'custom' ? _customVolume.text.trim() : _volume,
     );
@@ -4229,11 +4696,14 @@ class _CompressionDialogState extends State<_CompressionDialog> {
   }
 
   int _level = 5;
+  CompressionParameters _parameters = const CompressionParameters();
   String _encryption = 'AES256';
   bool _encryptNames = true;
   final _password = TextEditingController();
   bool _showPassword = false;
-  bool get _supportsPassword => _format == 'zip' || _format == '7z';
+  bool get _supportsPassword =>
+      const {'zip', 'zipx', '7z', 'sfx'}.contains(_format);
+  bool get _supportsVolumes => const {'zip', 'zipx', '7z'}.contains(_format);
   bool get _singleFileFormat => const {'gz', 'xz', 'bz2'}.contains(_format);
   bool get _validInput =>
       !_singleFileFormat ||
@@ -4260,7 +4730,8 @@ class _CompressionDialogState extends State<_CompressionDialog> {
     _presetRevision++;
     _presetName = preset.name;
     _format = preset.format;
-    _level = preset.level;
+    _level = _format == 'wim' ? 0 : preset.level;
+    _parameters = preset.parameters.forFormat(_format, _level);
     _encryption = preset.encryption;
     _encryptNames = preset.encryptNames;
     final mib = preset.volumeSize ~/ 1048576;
@@ -4275,6 +4746,8 @@ class _CompressionDialogState extends State<_CompressionDialog> {
   void _changeOptions(VoidCallback change) {
     setState(() {
       change();
+      if (_format == 'wim') _level = 0;
+      _parameters = _parameters.forFormat(_format, _level);
       _presetName = '';
     });
   }
@@ -4317,6 +4790,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
       name: result.$1,
       format: _format,
       level: _level,
+      parameters: _parameters,
       volumeSize: _volumeSize!,
       encryption: _encryption,
       encryptNames: _encryptNames,
@@ -4470,6 +4944,15 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                         value: 'zip',
                         child: Text('ZIP · 兼容性优先'),
                       ),
+                      DropdownMenuItem(
+                        value: 'zipx',
+                        child: Text('ZIPX · LZMA 默认'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'sfx',
+                        child: Text('Windows 自解压 EXE · x86'),
+                      ),
+                      DropdownMenuItem(value: 'wim', child: Text('WIM · 仅存储')),
                       DropdownMenuItem(value: '7z', child: Text('7z · 压缩率优先')),
                       DropdownMenuItem(value: 'tar', child: Text('TAR · 仅打包')),
                       DropdownMenuItem(value: 'tar.gz', child: Text('TAR.GZ')),
@@ -4493,6 +4976,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                 const SizedBox(width: 14),
                 Expanded(
                   child: DropdownButtonFormField<int>(
+                    key: ValueKey('compressionLevel:$_format'),
                     initialValue: _level,
                     decoration: const InputDecoration(labelText: '压缩等级'),
                     items: const [
@@ -4502,7 +4986,8 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                       DropdownMenuItem(value: 7, child: Text('最大')),
                       DropdownMenuItem(value: 9, child: Text('极限')),
                     ],
-                    onChanged: _savingPreset || _format == 'tar'
+                    onChanged:
+                        _savingPreset || const {'tar', 'wim'}.contains(_format)
                         ? null
                         : (value) => _changeOptions(() => _level = value!),
                   ),
@@ -4510,7 +4995,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
               ],
             ),
             const SizedBox(height: 12),
-            if (_supportsPassword) ...[
+            if (_supportsVolumes) ...[
               KeyedSubtree(
                 key: ValueKey('presetVolume:$_presetRevision'),
                 child: DropdownButtonFormField<String>(
@@ -4572,7 +5057,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                 ),
               ),
             const SizedBox(height: 12),
-            if (_format == 'zip')
+            if (const {'zip', 'zipx'}.contains(_format))
               DropdownButtonFormField<String>(
                 key: ValueKey('presetEncryption:$_presetRevision'),
                 initialValue: _encryption,
@@ -4588,7 +5073,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                     ? null
                     : (value) => _changeOptions(() => _encryption = value!),
               ),
-            if (_format == '7z')
+            if (const {'7z', 'sfx'}.contains(_format))
               CheckboxListTile(
                 contentPadding: EdgeInsets.zero,
                 dense: true,
@@ -4598,6 +5083,138 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                     ? null
                     : (value) => _changeOptions(() => _encryptNames = value!),
               ),
+            if (_format != 'tar')
+              ExpansionTile(
+                key: ValueKey('advanced:$_format:$_level:$_presetRevision'),
+                tilePadding: EdgeInsets.zero,
+                title: const Text('高级压缩参数'),
+                children: [
+                  DropdownButtonFormField<String>(
+                    key: ValueKey('compressionMethod:${_parameters.method}'),
+                    initialValue: _parameters.method,
+                    decoration: const InputDecoration(labelText: '压缩算法'),
+                    items: [
+                      for (final method in CompressionParameters.methodsFor(
+                        _format,
+                      ))
+                        DropdownMenuItem(
+                          value: method,
+                          child: Text(
+                            method == 'auto'
+                                ? '自动（${_parameters.effectiveMethod(_format, _level)}）'
+                                : method,
+                          ),
+                        ),
+                    ],
+                    onChanged: _savingPreset || _level == 0
+                        ? null
+                        : (value) => _changeOptions(
+                            () => _parameters = CompressionParameters(
+                              method: value!,
+                              dictionaryMiB: _parameters.dictionaryMiB,
+                              threads: _parameters.threads,
+                              solidMiB: _parameters.solidMiB,
+                            ),
+                          ),
+                  ),
+                  if (_parameters.supportsDictionary(_format, _level)) ...[
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<int>(
+                      key: ValueKey(
+                        'compressionDictionary:${_parameters.dictionaryMiB}',
+                      ),
+                      initialValue: _parameters.dictionaryMiB,
+                      decoration: const InputDecoration(labelText: '字典大小'),
+                      items: [
+                        for (final size in CompressionParameters.dictionaries)
+                          DropdownMenuItem(
+                            value: size,
+                            child: Text(size == 0 ? '自动' : '$size MiB'),
+                          ),
+                      ],
+                      onChanged: _savingPreset
+                          ? null
+                          : (value) => _changeOptions(
+                              () => _parameters = CompressionParameters(
+                                method: _parameters.method,
+                                dictionaryMiB: value!,
+                                threads: _parameters.threads,
+                                solidMiB: _parameters.solidMiB,
+                              ),
+                            ),
+                    ),
+                  ],
+                  if (_parameters.supportsSolid(_format, _level)) ...[
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<int>(
+                      key: ValueKey('compressionSolid:${_parameters.solidMiB}'),
+                      initialValue: _parameters.solidMiB,
+                      decoration: const InputDecoration(labelText: '固实块大小'),
+                      items: [
+                        for (final size in CompressionParameters.solidBlocks)
+                          DropdownMenuItem(
+                            value: size,
+                            child: Text(
+                              size == -1
+                                  ? '默认（关闭）'
+                                  : size == 0
+                                  ? '关闭固实压缩'
+                                  : '$size MiB',
+                            ),
+                          ),
+                      ],
+                      onChanged: _savingPreset
+                          ? null
+                          : (value) => _changeOptions(
+                              () => _parameters = CompressionParameters(
+                                method: _parameters.method,
+                                dictionaryMiB: _parameters.dictionaryMiB,
+                                threads: _parameters.threads,
+                                solidMiB: value!,
+                              ),
+                            ),
+                    ),
+                  ],
+                  if (CompressionParameters.supportsThreads(_format)) ...[
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<int>(
+                      key: ValueKey(
+                        'compressionThreads:${_parameters.threads}',
+                      ),
+                      initialValue: _parameters.threads,
+                      decoration: const InputDecoration(labelText: '线程上限'),
+                      items: [
+                        const DropdownMenuItem(value: 0, child: Text('自动')),
+                        for (var count = 1; count <= 64; count++)
+                          DropdownMenuItem(value: count, child: Text('$count')),
+                      ],
+                      onChanged: _savingPreset
+                          ? null
+                          : (value) => _changeOptions(
+                              () => _parameters = CompressionParameters(
+                                method: _parameters.method,
+                                dictionaryMiB: _parameters.dictionaryMiB,
+                                threads: value!,
+                                solidMiB: _parameters.solidMiB,
+                              ),
+                            ),
+                    ),
+                  ],
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: Text(
+                      '本机 ${Platform.numberOfProcessors} 个逻辑处理器。实际并行度由算法和输入决定。\n'
+                      '${_parameters.dictionaryMiB == 0
+                          ? '内存由引擎按等级和算法自动选择。'
+                          : _parameters.effectiveMethod(_format, _level) == 'PPMd'
+                          ? '每个编码器至少需要 ${_parameters.dictionaryMiB} MiB 模型内存。'
+                          : '每个 LZMA 编码器粗估需 ${_parameters.dictionaryMiB * 12 + 64} MiB 内存。'}'
+                      ' 多个编码器会增加总内存，实际占用还受文件和引擎缓冲影响。',
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                  ),
+                ],
+              ),
             const SizedBox(height: 12),
             Text(
               !_validInput
@@ -4605,6 +5222,8 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                   : switch (_format) {
                       '7z' => '7z 使用 AES-256。填写密码后启用加密。',
                       'zip' => '填写密码后启用所选加密算法。ZIP 密码请使用 ASCII 字符。',
+                      'sfx' => '生成供 Windows x86 运行的单个 EXE，可用于支持 32 位程序的 x64 系统。普通解压模块在解压完成后结束，包内文件的可信度由来源决定。生成包未签名，Windows 安全策略可能提示或阻止运行。',
+                      'wim' => 'WIM 使用引擎支持的存储方式，不支持密码和分卷；用于数据归档。',
                       'tar' => 'TAR 保留目录结构，仅打包，不进行压缩。',
                       'tar.gz' ||
                       'tar.bz2' ||
@@ -4636,6 +5255,7 @@ class _CompressionDialogState extends State<_CompressionDialog> {
                   _format,
                   _level,
                   _supportsPassword ? _password.text : '',
+                  parameters: _parameters,
                   volumeSize: _volumeSize!,
                   encryption: _encryption,
                   encryptNames: _encryptNames,
@@ -4758,6 +5378,9 @@ String _archiveStem(String path) {
     '.tar.gz',
     '.tar.bz2',
     '.tar.xz',
+    '.zipx',
+    '.exe',
+    '.wim',
     '.zip',
     '.7z',
     '.rar',

@@ -5,6 +5,8 @@ const nestedArchiveDepth = 8;
 
 bool isNestedArchive(String path) => const {
   '.zip',
+  '.zipx',
+  '.exe',
   '.7z',
   '.rar',
   '.tar',

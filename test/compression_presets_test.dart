@@ -78,6 +78,7 @@ void main() {
         'volumeSize',
         'encryption',
         'encryptNames',
+        'parameters',
       ]),
     );
     expect(preset.toJson().containsValue('secret'), isFalse);

@@ -27,6 +27,7 @@ LIB.f7_job_export_options.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c
 LIB.f7_job_extraction_options.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_char_p]
 LIB.f7_job_volume_size.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
 LIB.f7_job_filename_normalization.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+LIB.f7_job_compression_parameters.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_int32]
 LIB.f7_job_codepage.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 LIB.f7_free.argtypes = [ctypes.c_void_p]
 LIB.f7_run.restype = ctypes.c_void_p
@@ -35,9 +36,12 @@ LIB.f7_run.argtypes = [ctypes.c_void_p, *([ctypes.c_char_p] * 6), ctypes.c_int,
                       ctypes.POINTER(ctypes.c_uint32), ctypes.c_int]
 
 
-def execute(operation, archive, destination='', password='', format='zip', inputs=(), indices=(), job=None, code_page=0, volume_size=0, extraction_policy=0, expected_destination_version='', export_path='', export_version='', output_limit=0, filename_normalization=0):
+def execute(operation, archive, destination='', password='', format='zip', inputs=(), indices=(), job=None, code_page=0, volume_size=0, extraction_policy=0, expected_destination_version='', export_path='', export_version='', output_limit=0, filename_normalization=0, level=5, compression_parameters=None):
     owned = job is None
     job = LIB.f7_job_create() if owned else job
+    if compression_parameters is not None:
+        method, dictionary, threads, solid = compression_parameters
+        LIB.f7_job_compression_parameters(job, method.encode(), dictionary, threads, solid)
     LIB.f7_job_filename_normalization(job, filename_normalization)
     LIB.f7_job_output_limit(job, output_limit)
     LIB.f7_job_export_options(job, export_path.encode(), export_version.encode())
@@ -48,7 +52,7 @@ def execute(operation, archive, destination='', password='', format='zip', input
                archive, destination, password, format]]
     files = (ctypes.c_char_p * len(inputs))(*(str(value).encode() for value in inputs))
     selection = (ctypes.c_uint32 * len(indices))(*indices)
-    pointer = LIB.f7_run(job, *strings, 5, files, len(inputs), selection, len(indices))
+    pointer = LIB.f7_run(job, *strings, level, files, len(inputs), selection, len(indices))
     try:
         return json.loads(ctypes.string_at(pointer).decode())
     finally:

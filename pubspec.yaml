@@ -1,5 +1,5 @@
 name: f7zip
-description: '基于 7-Zip 原生引擎的 macOS 压缩工具'
+description: '基于 7-Zip 原生引擎的跨平台桌面压缩工具'
 publish_to: none
 version: 0.2.2+4
 environment:

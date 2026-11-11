@@ -189,11 +189,11 @@ class MainFlutterWindow: NSWindow {
         result(self.associationStates())
       case "setFileAssociation":
         self.setAssociation(call.arguments as? [String: Any] ?? [:], result: result)
-      case "openArchive", "chooseArchives", "chooseInputs", "chooseFolder":
+      case "openArchive", "chooseArchives", "chooseInputs", "chooseFolder", "chooseChecksumFiles":
         let panel = NSOpenPanel()
         panel.canChooseFiles = call.method != "chooseFolder"
-        panel.canChooseDirectories = !["openArchive", "chooseArchives"].contains(call.method)
-        panel.allowsMultipleSelection = ["chooseInputs", "chooseArchives"].contains(call.method)
+        panel.canChooseDirectories = !["openArchive", "chooseArchives", "chooseChecksumFiles"].contains(call.method)
+        panel.allowsMultipleSelection = ["chooseInputs", "chooseArchives", "chooseChecksumFiles"].contains(call.method)
         panel.prompt = call.method == "chooseFolder" ? "选择目标文件夹" : "选择"
         panel.beginSheetModal(for: self) { response in
           result(response == .OK ? panel.urls.map { $0.path } : [])
@@ -238,7 +238,7 @@ class MainFlutterWindow: NSWindow {
     channel?.invokeMethod("showSettings", arguments: nil)
   }
 
-  private let associationExtensions = ["zip", "7z", "rar", "tar", "gz", "xz", "bz2", "iso", "tgz", "tbz", "tbz2", "txz", "001", "z01", "r00", "zst", "cab", "dmg", "wim", "jar", "apk"]
+  private let associationExtensions = ["zip", "zipx", "7z", "rar", "tar", "gz", "xz", "bz2", "iso", "tgz", "tbz", "tbz2", "txz", "001", "z01", "r00", "zst", "cab", "dmg", "wim", "jar", "apk"]
 
   deinit {
     if let observer = previewTerminationObserver { NotificationCenter.default.removeObserver(observer) }

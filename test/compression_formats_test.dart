@@ -11,6 +11,7 @@ void main() {
 
   for (final (format, label) in [
     ('tar', 'TAR · 仅打包'),
+    ('wim', 'WIM · 仅存储'),
     ('tar.gz', 'TAR.GZ'),
     ('tar.bz2', 'TAR.BZ2'),
     ('tar.xz', 'TAR.XZ'),
@@ -68,7 +69,7 @@ void main() {
     });
   }
 
-  for (final format in ['zip', '7z']) {
+  for (final format in ['zip', 'zipx', '7z']) {
     testWidgets('$format 自定义分卷大小验证并自动打开首卷', (tester) async {
       tester.view.physicalSize = const Size(1120, 900);
       tester.view.devicePixelRatio = 1;
@@ -92,6 +93,7 @@ void main() {
       await tester.tap(find.text('新建压缩包').last);
       await tester.pumpAndSettle();
       if (format == '7z') await _chooseFormat(tester, '7z · 压缩率优先');
+      if (format == 'zipx') await _chooseFormat(tester, 'ZIPX · LZMA 默认');
       await tester.tap(find.byKey(const ValueKey('volumeSize')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('自定义').last);

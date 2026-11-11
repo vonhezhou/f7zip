@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <utility>
+#include <unistd.h>
 
 static uint64_t littleEndian(const unsigned char* data, size_t size) {
     uint64_t value = 0;
@@ -132,6 +133,14 @@ void ZipEncodingScope::detectArchive(const char* archive) {
     setCodePage(selected);
 }
 
+std::string windowsFilenameKey(const std::string& value) {
+    @autoreleasepool {
+        NSString* text = [NSString stringWithUTF8String:value.c_str()];
+        if (!text) throw std::runtime_error("Windows 文件名不是有效的 UTF-8");
+        return std::string(text.precomposedStringWithCanonicalMapping.uppercaseString.UTF8String);
+    }
+}
+
 std::string normalizeUnicodeName(const std::string& value, uint32_t mode) {
     if (mode == 0) return value;
     if (mode > 2) throw std::runtime_error("无效的 Unicode 文件名规范化选项");
@@ -154,5 +163,32 @@ std::string moveArchiveToTrash(const std::string& path) {
             throw std::runtime_error(std::string("无法移至废纸篓。") + (error.localizedDescription.UTF8String ?: "系统回收失败"));
         }
         return trashed ? std::string(trashed.fileSystemRepresentation) : std::string();
+    }
+}
+
+// EOCD 位于文件尾，修改归档注释不改变中央目录、ZIP64 或压缩数据偏移。
+void replaceZipArchiveComment(const std::string& path, const std::string& comment) {
+    if (comment.size() > 16384) throw std::runtime_error("注释最多支持 16384 个 UTF-8 字节");
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out | std::ios::ate);
+    if (!file || file.tellg() < 22) throw std::runtime_error("无法读取 ZIP 结束记录");
+    const auto size = static_cast<uint64_t>(file.tellg());
+    const auto tailSize = static_cast<size_t>(std::min<uint64_t>(size, 65557));
+    std::vector<unsigned char> tail(tailSize);
+    file.seekg(static_cast<std::streamoff>(size - tailSize));
+    file.read(reinterpret_cast<char*>(tail.data()), tail.size());
+    size_t end = tail.size() - 22;
+    while (littleEndian(tail.data() + end, 4) != 0x06054b50 ||
+        end + 22 + littleEndian(tail.data() + end + 20, 2) != tail.size()) {
+        if (end == 0) throw std::runtime_error("ZIP 结束记录不完整，已停止编辑注释");
+        --end;
+    }
+    const auto offset = size - tailSize + end;
+    const unsigned char length[2] = {static_cast<unsigned char>(comment.size()), static_cast<unsigned char>(comment.size() >> 8)};
+    file.seekp(static_cast<std::streamoff>(offset + 20));
+    file.write(reinterpret_cast<const char*>(length), 2);
+    file.write(comment.data(), static_cast<std::streamsize>(comment.size()));
+    file.close();
+    if (!file || truncate(path.c_str(), static_cast<off_t>(offset + 22 + comment.size())) != 0) {
+        throw std::runtime_error("无法完整保存 ZIP 归档注释");
     }
 }

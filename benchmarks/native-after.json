@@ -1,0 +1,257 @@
+{
+  "schema": 1,
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "machine": "arm64",
+  "logicalProcessors": 18,
+  "sizeMiB": 16,
+  "repetitions": 3,
+  "workers": 4,
+  "cache": "warm, no cache flush, setup and SHA-256 verification excluded",
+  "artifacts": {
+    "f7zip": "39cc2b622619c74a50a89e5ed75bdcdb3b7150b08c468b5f83b66ea2120a1b36",
+    "7z.so": "2a920a45c1b4bb98f289f9703de5017c7de16525a0ddab2a27c50af092e464a7",
+    "libf7zip.dylib": "1544fb9398e1c11ae34f74ab4295de141a0781b9ead6d416e0c89ece6ca56103"
+  },
+  "cases": [
+    {
+      "corpus": "tiny",
+      "format": "zip",
+      "bytes": 32,
+      "files": 1,
+      "corpusSha256": "46be54a16d189a9d72666c3a3a895bc2e46497e1d66ef74a32a40c7b6acb397c",
+      "archiveBytes": 324,
+      "compress": {
+        "seconds": [
+          0.009045458999999999,
+          0.009021416999999997,
+          0.008897292000000001
+        ],
+        "medianSeconds": 0.009021416999999997
+      },
+      "extract": {
+        "seconds": [
+          0.0060162919999999925,
+          0.005982207999999989,
+          0.0059825419999999935
+        ],
+        "medianSeconds": 0.0059825419999999935
+      },
+      "zipAbiWorkers1": {
+        "seconds": [
+          0.0015839579999999964,
+          0.0007021670000000035,
+          0.0006447920000000051
+        ],
+        "medianSeconds": 0.0007021670000000035
+      }
+    },
+    {
+      "corpus": "tiny",
+      "format": "7z",
+      "bytes": 32,
+      "files": 1,
+      "corpusSha256": "46be54a16d189a9d72666c3a3a895bc2e46497e1d66ef74a32a40c7b6acb397c",
+      "archiveBytes": 204,
+      "compress": {
+        "seconds": [
+          0.006456457999999998,
+          0.006226833000000001,
+          0.005989375000000005
+        ],
+        "medianSeconds": 0.006226833000000001
+      },
+      "extract": {
+        "seconds": [
+          0.005445124999999995,
+          0.005273833999999991,
+          0.006044958000000003
+        ],
+        "medianSeconds": 0.005445124999999995
+      }
+    },
+    {
+      "corpus": "small",
+      "format": "zip",
+      "bytes": 1048576,
+      "files": 256,
+      "corpusSha256": "8cc15e5d51c733a6a1a3689ffa5a39ba9c25672a165fabccb75a63384a7fb6ec",
+      "archiveBytes": 570002,
+      "compress": {
+        "seconds": [
+          0.365293208,
+          0.354019125,
+          0.35549537500000006
+        ],
+        "medianSeconds": 0.35549537500000006
+      },
+      "extract": {
+        "seconds": [
+          0.1005472919999999,
+          0.10179716599999988,
+          0.10002770799999983
+        ],
+        "medianSeconds": 0.1005472919999999
+      },
+      "zipAbiWorkers1": {
+        "seconds": [
+          0.09446424999999992,
+          0.09617745799999988,
+          0.09602666699999984
+        ],
+        "medianSeconds": 0.09602666699999984
+      },
+      "zipAbiWorkers4": {
+        "seconds": [
+          0.22656354200000006,
+          0.22821649999999982,
+          0.23449020900000006
+        ],
+        "medianSeconds": 0.22821649999999982
+      }
+    },
+    {
+      "corpus": "small",
+      "format": "7z",
+      "bytes": 1048576,
+      "files": 256,
+      "corpusSha256": "8cc15e5d51c733a6a1a3689ffa5a39ba9c25672a165fabccb75a63384a7fb6ec",
+      "archiveBytes": 533254,
+      "compress": {
+        "seconds": [
+          0.10335824999999987,
+          0.10283720799999996,
+          0.10346104099999964
+        ],
+        "medianSeconds": 0.10335824999999987
+      },
+      "extract": {
+        "seconds": [
+          0.08582554199999981,
+          0.08805979200000014,
+          0.08555179099999988
+        ],
+        "medianSeconds": 0.08582554199999981
+      }
+    },
+    {
+      "corpus": "mixed",
+      "format": "zip",
+      "bytes": 16777216,
+      "files": 32,
+      "corpusSha256": "2a8081b1bc5904f69056ec79d897f9de00c62cb523193e12fbae34a0b62f25c6",
+      "archiveBytes": 8416370,
+      "compress": {
+        "seconds": [
+          4.684199584,
+          4.661133542,
+          4.866445582999999
+        ],
+        "medianSeconds": 4.684199584
+      },
+      "extract": {
+        "seconds": [
+          0.6939245420000013,
+          0.694229,
+          0.6996717910000001
+        ],
+        "medianSeconds": 0.694229
+      },
+      "zipAbiWorkers1": {
+        "seconds": [
+          0.6847851669999976,
+          0.7054559169999983,
+          0.6846055409999998
+        ],
+        "medianSeconds": 0.6847851669999976
+      },
+      "zipAbiWorkers4": {
+        "seconds": [
+          1.4449998339999972,
+          1.441835000000001,
+          1.4484864580000014
+        ],
+        "medianSeconds": 1.4449998339999972
+      }
+    },
+    {
+      "corpus": "mixed",
+      "format": "7z",
+      "bytes": 16777216,
+      "files": 32,
+      "corpusSha256": "2a8081b1bc5904f69056ec79d897f9de00c62cb523193e12fbae34a0b62f25c6",
+      "archiveBytes": 1062594,
+      "compress": {
+        "seconds": [
+          1.374435708,
+          1.3677662919999989,
+          1.377594792
+        ],
+        "medianSeconds": 1.374435708
+      },
+      "extract": {
+        "seconds": [
+          0.11816854199999938,
+          0.11956670800000069,
+          0.11765358300000273
+        ],
+        "medianSeconds": 0.11816854199999938
+      }
+    },
+    {
+      "corpus": "single",
+      "format": "zip",
+      "bytes": 16777216,
+      "files": 1,
+      "corpusSha256": "71f1301037099132a9c8032d804501d5a4e89c636f6c244460c6d3c1d92b637d",
+      "archiveBytes": 44689,
+      "compress": {
+        "seconds": [
+          1.4884926670000027,
+          1.4711660000000037,
+          1.4884658329999993
+        ],
+        "medianSeconds": 1.4884658329999993
+      },
+      "extract": {
+        "seconds": [
+          0.023912207999998714,
+          0.023042166000003306,
+          0.023246624999998744
+        ],
+        "medianSeconds": 0.023246624999998744
+      },
+      "zipAbiWorkers1": {
+        "seconds": [
+          0.017697957999999403,
+          0.017624958000006075,
+          0.01760508299999941
+        ],
+        "medianSeconds": 0.017624958000006075
+      }
+    },
+    {
+      "corpus": "single",
+      "format": "7z",
+      "bytes": 16777216,
+      "files": 1,
+      "corpusSha256": "71f1301037099132a9c8032d804501d5a4e89c636f6c244460c6d3c1d92b637d",
+      "archiveBytes": 2719,
+      "compress": {
+        "seconds": [
+          1.3691917079999953,
+          1.3768728330000002,
+          1.367815125
+        ],
+        "medianSeconds": 1.3691917079999953
+      },
+      "extract": {
+        "seconds": [
+          0.01579554199999933,
+          0.014979457999999113,
+          0.015340166000001432
+        ],
+        "medianSeconds": 0.015340166000001432
+      }
+    }
+  ]
+}

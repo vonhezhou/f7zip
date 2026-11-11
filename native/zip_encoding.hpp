@@ -22,4 +22,7 @@ private:
 };
 
 std::string normalizeUnicodeName(const std::string& value, uint32_t mode);
+std::string windowsFilenameKey(const std::string& value);
 std::string moveArchiveToTrash(const std::string& path);
+
+void replaceZipArchiveComment(const std::string& path, const std::string& comment);

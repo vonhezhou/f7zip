@@ -1,3 +1,5 @@
+import 'compression_parameters.dart';
+
 class CompressionPreset {
   const CompressionPreset({
     required this.name,
@@ -6,12 +8,16 @@ class CompressionPreset {
     this.volumeSize = 0,
     this.encryption = 'AES256',
     this.encryptNames = true,
+    this.parameters = const CompressionParameters(),
   });
 
   factory CompressionPreset.fromJson(Map<dynamic, dynamic> json) {
     const formats = {
       'zip',
+      'zipx',
+      'wim',
       '7z',
+      'sfx',
       'tar',
       'tar.gz',
       'tar.bz2',
@@ -26,7 +32,7 @@ class CompressionPreset {
     final format = formats.contains(json['format'])
         ? json['format'] as String
         : 'zip';
-    final rawLevel = json['level'];
+    final rawLevel = format == 'wim' ? 0 : json['level'];
     final rawVolume = json['volumeSize'];
     final volume =
         rawVolume is int &&
@@ -36,10 +42,14 @@ class CompressionPreset {
         ? rawVolume
         : 0;
     return CompressionPreset(
+      parameters: CompressionParameters.fromJson(json['parameters']).forFormat(
+        format,
+        rawLevel is int && levels.contains(rawLevel) ? rawLevel : 5,
+      ),
       name: name.length <= 40 ? name : name.substring(0, 40),
       format: format,
       level: rawLevel is int && levels.contains(rawLevel) ? rawLevel : 5,
-      volumeSize: const {'zip', '7z'}.contains(format) ? volume : 0,
+      volumeSize: const {'zip', 'zipx', '7z'}.contains(format) ? volume : 0,
       encryption: json['encryption'] == 'ZipCrypto' ? 'ZipCrypto' : 'AES256',
       encryptNames: json['encryptNames'] is bool
           ? json['encryptNames'] as bool
@@ -53,6 +63,7 @@ class CompressionPreset {
   final int volumeSize;
   final String encryption;
   final bool encryptNames;
+  final CompressionParameters parameters;
 
   Map<String, dynamic> toJson() => {
     'name': name,
@@ -61,5 +72,6 @@ class CompressionPreset {
     'volumeSize': volumeSize,
     'encryption': encryption,
     'encryptNames': encryptNames,
+    'parameters': parameters.forFormat(format, level).toJson(),
   };
 }

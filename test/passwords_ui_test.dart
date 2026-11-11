@@ -17,6 +17,7 @@ void main() {
     'open',
     'extract',
     'test',
+    'split',
     'preview',
     'finder',
     'batch',
@@ -119,6 +120,10 @@ void main() {
             return workspace.path;
           case 'chooseFolder':
             return [output.path];
+          case 'openArchive':
+            return [archive];
+          case 'saveArchive':
+            return p.join(root.path, 'archive-parts');
           case 'chooseArchives':
             return [archive];
           case 'archivePasswordCandidates':
@@ -197,6 +202,27 @@ void main() {
           'batch' => 'batchTest',
           _ => 'test',
         };
+        if (scenario == 'split') {
+          unawaited(
+            _native('archiveCommand', 'test').then((_) => finished = true),
+          );
+          await _until(tester, () => finished);
+          expect(candidateCalls, 1);
+          unawaited(_native('archiveCommand', 'splitFile'));
+          await _until(
+            tester,
+            () => find
+                .byKey(const ValueKey('filePartSize'))
+                .evaluate()
+                .isNotEmpty,
+          );
+          await tester.tap(find.text('选择输出名称'));
+          await _until(
+            tester,
+            () => find.text('文件分割完成 · 1 片，已保存校验清单').evaluate().isNotEmpty,
+          );
+          finished = false;
+        }
         if (scenario == 'queueCancel') {
           await _native('finderRequest', {
             'action': 'test',

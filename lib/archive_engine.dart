@@ -7,6 +7,22 @@ import 'package:ffi/ffi.dart';
 import 'package:path/path.dart' as p;
 
 import 'filename_normalization.dart';
+import 'compression_parameters.dart';
+
+typedef _CompressionParametersNative = Void Function(
+  Pointer<Void>,
+  Pointer<Utf8>,
+  Uint32,
+  Uint32,
+  Int32,
+);
+typedef _CompressionParameters = void Function(
+  Pointer<Void>,
+  Pointer<Utf8>,
+  int,
+  int,
+  int,
+);
 
 typedef _ExportOptionsNative = Void Function(
   Pointer<Void>,
@@ -126,6 +142,8 @@ class ArchiveEntry {
     required this.modified,
     this.method = '',
     this.crc = '',
+    this.comment = '',
+    this.commented = false,
   });
 
   factory ArchiveEntry.fromJson(Map<String, dynamic> json) => ArchiveEntry(
@@ -138,6 +156,8 @@ class ArchiveEntry {
     modified: json['modified'] as int,
     method: json['method'] as String? ?? '',
     crc: json['crc'] as String? ?? '',
+    comment: json['comment'] as String? ?? '',
+    commented: json['commented'] == true,
   );
 
   final int index;
@@ -149,6 +169,8 @@ class ArchiveEntry {
   final int modified;
   final String method;
   final String crc;
+  final String comment;
+  final bool commented;
 
   String get normalizedPath {
     var value = path.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '');
@@ -186,6 +208,7 @@ class ArchiveRequest {
     this.expectedDestinationVersion = '',
     this.format = 'zip',
     this.level = 5,
+    this.parameters = const CompressionParameters(),
     this.outputLimit = 0,
     this.inputs = const [],
     this.indices = const [],
@@ -209,6 +232,7 @@ class ArchiveRequest {
     expectedDestinationVersion: expectedDestinationVersion,
     format: format,
     level: level,
+    parameters: parameters,
     outputLimit: outputLimit,
     inputs: inputs,
     indices: indices,
@@ -228,6 +252,7 @@ class ArchiveRequest {
   final String expectedDestinationVersion;
   final String format;
   final int level;
+  final CompressionParameters parameters;
   final int outputLimit;
   final List<String> inputs;
   final List<int> indices;
@@ -368,10 +393,27 @@ Map<String, dynamic> _execute(
     library.lookupFunction<_VolumeSizeNative, _VolumeSize>(
       'f7_job_output_limit',
     )(job, request.outputLimit);
-    if (request.operation == 'export' || request.operation == 'trash') {
+    if (request.operation == 'export' ||
+        request.operation == 'trash' ||
+        request.operation == 'joinFile' ||
+        request.operation == 'repairZip' ||
+        request.operation == 'passwordSearch' ||
+        request.operation == 'passwordSearchInfo') {
       library.lookupFunction<_ExportOptionsNative, _ExportOptions>(
         'f7_job_export_options',
       )(job, utf8(request.itemPath), utf8(request.expectedVersion));
+    }
+    if (request.operation == 'compress') {
+      library
+          .lookupFunction<_CompressionParametersNative, _CompressionParameters>(
+            'f7_job_compression_parameters',
+          )(
+        job,
+        utf8(request.parameters.method),
+        request.parameters.dictionaryMiB,
+        request.parameters.threads,
+        request.parameters.solidMiB,
+      );
     }
     final engine = utf8(p.join(directory, '7z.so'));
     Pointer<Utf8> response;
@@ -391,6 +433,11 @@ Map<String, dynamic> _execute(
     } else if (const {
       'add',
       'addReplace',
+      'updateNewer',
+      'updateExisting',
+      'syncDirectory',
+      'fileComment',
+      'archiveComment',
       'remove',
       'rename',
       'mkdir',

@@ -38,3 +38,9 @@ static void f7zipDecodeLegacy(UString& result, const AString& input, UInt32 code
     }
     if (!ConvertUTF8ToUnicode(AString(buffer.c_str()), result)) throw std::runtime_error("Invalid decoded ZIP filename");
 }
+
+// 归档注释没有 UTF-8 标志，有效 UTF-8 优先，否则沿用所选旧编码。
+void f7zipDecodeZipComment(UString& result, const AString& input) {
+    if (CheckUTF8_AString(input) && ConvertUTF8ToUnicode(input, result)) return;
+    f7zipDecodeLegacy(result, input, f7zipCodePage && f7zipCodePage != CP_UTF8 ? f7zipCodePage : 437);
+}

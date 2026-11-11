@@ -18,6 +18,8 @@ class MainFlutterWindow: NSWindow {
   private var previewDirectories = Set<URL>()
   private var archivePreviews: [String: ArchivePreviewWindowController] = [:]
   private var previewTerminationObserver: NSObjectProtocol?
+  private var windowObservers: [NSObjectProtocol] = []
+  private var windowChannel: FlutterMethodChannel?
 
   override func awakeFromNib() {
     (NSApp.delegate as? AppDelegate)?.archiveWindow = self
@@ -25,6 +27,11 @@ class MainFlutterWindow: NSWindow {
     contentViewController = controller
     // 后台服务启动也需要加载视图并启动 Dart，不能等待窗口显示。
     contentView = controller.view
+    // 内容延伸到标题栏，自绘控件仍通过 NSWindow 执行系统窗口操作。
+    styleMask.insert(.fullSizeContentView)
+    titleVisibility = .hidden
+    titlebarAppearsTransparent = true
+    isMovableByWindowBackground = false
     setContentSize(NSSize(width: 1120, height: 740))
     minSize = NSSize(width: 860, height: 580)
     center()
@@ -32,6 +39,37 @@ class MainFlutterWindow: NSWindow {
     RegisterGeneratedPlugins(registry: controller)
     let bridge = FlutterMethodChannel(name: "sevenzip/desktop", binaryMessenger: controller.engine.binaryMessenger)
     channel = bridge
+    let windowBridge = FlutterMethodChannel(name: "sevenzip/window", binaryMessenger: controller.engine.binaryMessenger)
+    windowChannel = windowBridge
+    windowBridge.setMethodCallHandler { [weak self] call, result in
+      guard let self else { result(nil); return }
+      switch call.method {
+      case "state": result(self.windowState); return
+      case "close": self.performClose(nil)
+      case "minimize": self.miniaturize(nil)
+      case "fullScreen": self.toggleFullScreen(nil)
+      case "drag":
+        if !self.styleMask.contains(.fullScreen), NSEvent.pressedMouseButtons & 1 != 0,
+           let event = self.lastDragEvent {
+          self.performDrag(with: event)
+        }
+      case "doubleClick":
+        let action = UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") ?? "Maximize"
+        if action == "Minimize" { self.miniaturize(nil) }
+        else if action != "None" { self.performZoom(nil) }
+      default: result(FlutterMethodNotImplemented); return
+      }
+      result(nil)
+    }
+    for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
+                 NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+      windowObservers.append(NotificationCenter.default.addObserver(forName: name, object: self, queue: .main) { [weak self] _ in
+        guard let self else { return }
+        self.hideSystemWindowButtons()
+        self.windowChannel?.invokeMethod("stateChanged", arguments: self.windowState)
+      })
+    }
+    hideSystemWindowButtons()
     previewTerminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
       self?.cleanupArchivePreviews()
       self?.cleanupNestedArchives()
@@ -274,6 +312,16 @@ class MainFlutterWindow: NSWindow {
     }
   }
 
+  private var windowState: [String: Bool] {
+    ["focused": isKeyWindow, "fullScreen": styleMask.contains(.fullScreen)]
+  }
+
+  private func hideSystemWindowButtons() {
+    for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+      standardWindowButton(button)?.isHidden = true
+    }
+  }
+
   @objc private func showPreferences(_ sender: Any?) {
     channel?.invokeMethod("showSettings", arguments: nil)
   }
@@ -281,6 +329,7 @@ class MainFlutterWindow: NSWindow {
   private let associationExtensions = ["zip", "zipx", "7z", "rar", "tar", "gz", "xz", "bz2", "iso", "tgz", "tbz", "tbz2", "txz", "001", "z01", "r00", "zst", "cab", "dmg", "wim", "jar", "apk"]
 
   deinit {
+    for observer in windowObservers { NotificationCenter.default.removeObserver(observer) }
     if let observer = previewTerminationObserver { NotificationCenter.default.removeObserver(observer) }
     if let monitor = dragEventMonitor { NSEvent.removeMonitor(monitor) }
   }

@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import 'window_chrome.dart';
 import 'archive_engine.dart';
 import 'archive_backup.dart';
 import 'archive_drag.dart';
@@ -3310,236 +3311,291 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   }
 
   Widget _toolbar() => Container(
-    height: 60,
-    padding: const EdgeInsets.symmetric(horizontal: 10),
+    height: 52,
+    padding: const EdgeInsets.only(right: 8),
     decoration: BoxDecoration(
       color: AppColors.of(context).canvas,
       border: Border(bottom: BorderSide(color: AppColors.of(context).border)),
     ),
-    child: Row(
+    child: Stack(
       children: [
-        _tool(
-          Icons.folder_open_rounded,
-          '打开',
-          '⌘O',
-          _interactive ? _openDialog : null,
-          emphasized: _archive == null,
-        ),
-        _tool(
-          Icons.inventory_2_outlined,
-          '新建压缩包',
-          '⌘N',
-          _interactive ? _create : null,
-        ),
-        const SizedBox(height: 26, child: VerticalDivider(width: 16)),
-        _tool(
-          Icons.drive_folder_upload_outlined,
-          '解压到…',
-          '⌘E',
-          _interactive && _archive != null ? _extract : null,
-          emphasized: _archive != null,
-        ),
-        _tool(
-          Icons.add_box_outlined,
-          '添加',
-          '⇧⌘A',
-          _interactive && _editable && _archive != null ? _addFiles : null,
-        ),
-        _tool(
-          Icons.delete_outline,
-          '删除',
-          '⌘⌫',
-          _interactive && _editable && _selected.isNotEmpty
-              ? _removeSelected
-              : null,
-        ),
-        _tool(
-          Icons.verified_outlined,
-          '测试',
-          '检查完整性',
-          _interactive && _archive != null ? _test : null,
-        ),
-        const SizedBox(height: 26, child: VerticalDivider(width: 16)),
-        if (MediaQuery.sizeOf(context).width >= 940)
-          _tool(
-            Icons.preview_outlined,
-            '预览',
-            '内置预览',
-            _canPreview ? () => _previewFile(_selectedFile!) : null,
+        if (_showTree || _archive == null)
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: (_archive == null ? 192 : _treeWidth) + 5,
+            child: ColoredBox(color: AppColors.of(context).sidebar),
           ),
-        _tool(
-          Icons.visibility_outlined,
-          '查看',
-          'F3',
-          _interactive && _selectedFile != null
-              ? () => _openFile(_selectedFile!)
-              : null,
-        ),
-        _tool(
-          Icons.edit_outlined,
-          '编辑',
-          'F4',
-          _interactive && _editable && _selectedFile != null
-              ? () => _openFile(_selectedFile!, editing: true)
-              : null,
-        ),
-        if (MediaQuery.sizeOf(context).width >= 860)
-          _tool(
-            Icons.article_outlined,
-            '属性',
-            '⌘I',
-            _interactive && _archive != null ? _properties : null,
-          ),
-        const Spacer(),
-        PopupMenuButton<String>(
-          tooltip: '最近打开',
-          enabled: _interactive && _recent.isNotEmpty,
-          icon: const Icon(Icons.history_rounded, size: 19),
-          onSelected: _open,
-          itemBuilder: (_) => _recent
-              .map(
-                (path) => PopupMenuItem(
-                  value: path,
-                  child: Tooltip(
-                    message: path,
-                    child: Text(
-                      p.basename(path),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+        Row(
+          children: [
+            const WindowControls(),
+            IconButton(
+              tooltip: _showTree ? '隐藏侧栏' : '显示侧栏',
+              onPressed: _archive == null
+                  ? null
+                  : () => setState(() => _showTree = !_showTree),
+              icon: const Icon(Icons.vertical_split_outlined, size: 19),
+            ),
+            const SizedBox(width: 8),
+            _tool(
+              Icons.folder_open_rounded,
+              '打开',
+              '⌘O',
+              _interactive ? _openDialog : null,
+              emphasized: _archive == null,
+            ),
+            _tool(
+              Icons.inventory_2_outlined,
+              '新建',
+              '⌘N',
+              _interactive ? _create : null,
+            ),
+            const SizedBox(height: 26, child: VerticalDivider(width: 16)),
+            _tool(
+              Icons.drive_folder_upload_outlined,
+              '解压到…',
+              '⌘E',
+              _interactive && _archive != null ? _extract : null,
+              emphasized: _archive != null,
+            ),
+            _tool(
+              Icons.add_box_outlined,
+              '添加',
+              '⇧⌘A',
+              _interactive && _editable && _archive != null ? _addFiles : null,
+            ),
+            _tool(
+              Icons.delete_outline,
+              '删除',
+              '⌘⌫',
+              _interactive && _editable && _selected.isNotEmpty
+                  ? _removeSelected
+                  : null,
+            ),
+            _tool(
+              Icons.verified_outlined,
+              '测试',
+              '检查完整性',
+              _interactive && _archive != null ? _test : null,
+            ),
+            const SizedBox(height: 26, child: VerticalDivider(width: 16)),
+            if (MediaQuery.sizeOf(context).width >= 1100)
+              _tool(
+                Icons.preview_outlined,
+                '预览',
+                '内置预览',
+                _canPreview ? () => _previewFile(_selectedFile!) : null,
+              ),
+            if (MediaQuery.sizeOf(context).width >= 1000)
+              _tool(
+                Icons.visibility_outlined,
+                '查看',
+                'F3',
+                _interactive && _selectedFile != null
+                    ? () => _openFile(_selectedFile!)
+                    : null,
+              ),
+            if (MediaQuery.sizeOf(context).width >= 940)
+              _tool(
+                Icons.edit_outlined,
+                '编辑',
+                'F4',
+                _interactive && _editable && _selectedFile != null
+                    ? () => _openFile(_selectedFile!, editing: true)
+                    : null,
+              ),
+            if (MediaQuery.sizeOf(context).width >= 1200)
+              _tool(
+                Icons.article_outlined,
+                '属性',
+                '⌘I',
+                _interactive && _archive != null ? _properties : null,
+              ),
+            Expanded(
+              child: WindowDragArea(
+                child: SizedBox(
+                  height: 52,
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      child: Text(
+                        _archive == null ? 'F7Zip' : p.basename(_archive!),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: AppColors.of(context).secondary,
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              )
-              .toList(),
-        ),
-        IconButton(
-          tooltip: '任务队列',
-          constraints: const BoxConstraints.tightFor(width: 32, height: 36),
-          padding: EdgeInsets.zero,
-          onPressed: () => setState(() => _showTasks = !_showTasks),
-          icon: const Icon(Icons.list_alt_outlined, size: 19),
-        ),
-        IconButton(
-          tooltip: '设置',
-          onPressed: _interactive ? _showSettings : null,
-          icon: const Icon(Icons.settings_outlined, size: 19),
-        ),
-        PopupMenuButton<String>(
-          tooltip: '更多操作',
-          enabled: _interactive,
-          icon: const Icon(Icons.more_horiz, size: 22),
-          onSelected: (action) async {
-            switch (action) {
-              case 'quick':
-                await _extract(besideArchive: true);
-                break;
-              case 'selected':
-                await _extract(selectedOnly: true);
-                break;
-              case 'about':
-                await _about();
-                break;
-              case 'finder':
-                await _desktop.invokeMethod<void>(
-                  'reveal',
-                  _archive ?? _lastOutput,
-                );
-                break;
-              default:
-                await _command(action);
-            }
-          },
-          itemBuilder: (_) => [
-            PopupMenuItem(
-              value: 'properties',
-              enabled: _archive != null,
-              child: const Text('属性'),
+              ),
             ),
-            PopupMenuItem(
-              value: 'nested',
-              enabled:
-                  _selectedFile != null &&
-                  isNestedArchive(_selectedFile!.normalizedPath),
-              child: const Text('进入子压缩包'),
+            PopupMenuButton<String>(
+              tooltip: '最近打开',
+              enabled: _interactive && _recent.isNotEmpty,
+              icon: const Icon(Icons.history_rounded, size: 19),
+              onSelected: _open,
+              itemBuilder: (_) => _recent
+                  .map(
+                    (path) => PopupMenuItem(
+                      value: path,
+                      child: Tooltip(
+                        message: path,
+                        child: Text(
+                          p.basename(path),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ),
+                  )
+                  .toList(),
             ),
-            PopupMenuItem(
-              value: 'parentArchive',
-              enabled: _archiveParents.isNotEmpty,
-              child: const Text('返回父压缩包'),
+            IconButton(
+              tooltip: '任务队列',
+              constraints: const BoxConstraints.tightFor(width: 32, height: 36),
+              padding: EdgeInsets.zero,
+              onPressed: () => setState(() => _showTasks = !_showTasks),
+              icon: const Icon(Icons.list_alt_outlined, size: 19),
             ),
-            PopupMenuItem(
-              value: 'preview',
-              enabled: _canPreview,
-              child: const Text('内置预览'),
+            IconButton(
+              tooltip: '设置',
+              onPressed: _interactive ? _showSettings : null,
+              icon: const Icon(Icons.settings_outlined, size: 19),
             ),
-            PopupMenuItem(
-              value: 'quick',
-              enabled: _archive != null,
-              child: const Text('快速解压到同级目录'),
-            ),
-            PopupMenuItem(
-              value: 'extractTrash',
-              enabled: _archive != null && _archiveParents.isEmpty,
-              child: const Text('解压后移至废纸篓…'),
-            ),
-            PopupMenuItem(
-              value: 'selected',
-              enabled: _selected.isNotEmpty,
-              child: const Text('解压选中项…'),
-            ),
-            const PopupMenuDivider(),
-            PopupMenuItem(
-              value: 'rename',
-              enabled: _editable && _selected.length == 1,
-              child: const Text('重命名…'),
-            ),
-            PopupMenuItem(
-              value: 'mkdir',
-              enabled: _editable && _archive != null,
-              child: const Text('新建文件夹…'),
-            ),
-            PopupMenuItem(
-              value: 'fileComment',
-              enabled: _commentEditable && _selectedFile != null,
-              child: const Text('编辑文件注释…'),
-            ),
-            PopupMenuItem(
-              value: 'archiveComment',
-              enabled: _commentEditable,
-              child: const Text('编辑归档注释…'),
-            ),
-            const PopupMenuItem(value: 'splitFile', child: Text('分割普通文件…')),
-            const PopupMenuItem(value: 'joinFile', child: Text('合并分片…')),
-            const PopupMenuItem(value: 'repairZip', child: Text('修复 ZIP…')),
-            const PopupMenuItem(
-              value: 'recoverPassword',
-              child: Text('自有归档密码恢复…'),
-            ),
-            const PopupMenuItem(value: 'checksums', child: Text('校验工具…')),
-            PopupMenuItem(
-              value: 'updateMode',
-              enabled: _editable && _archive != null,
-              child: const Text('更新模式…'),
-            ),
-            PopupMenuItem(
-              value: 'restore',
-              enabled: _editable && _archive != null,
-              child: const Text('恢复原包备份…'),
-            ),
-            PopupMenuItem(
-              value: 'tree',
-              child: Text(_showTree ? '隐藏文件树' : '显示文件树'),
-            ),
-            PopupMenuItem(
-              value: 'finder',
-              enabled: _archive != null || _lastOutput != null,
-              child: const Text('在 Finder 显示'),
-            ),
-            const PopupMenuItem(value: 'about', child: Text('关于 F7Zip')),
-            PopupMenuItem(
-              value: 'close',
-              enabled: _archive != null,
-              child: const Text('关闭压缩包'),
+            PopupMenuButton<String>(
+              tooltip: '更多操作',
+              enabled: _interactive,
+              icon: const Icon(Icons.more_horiz, size: 22),
+              onSelected: (action) async {
+                switch (action) {
+                  case 'quick':
+                    await _extract(besideArchive: true);
+                    break;
+                  case 'selected':
+                    await _extract(selectedOnly: true);
+                    break;
+                  case 'about':
+                    await _about();
+                    break;
+                  case 'finder':
+                    await _desktop.invokeMethod<void>(
+                      'reveal',
+                      _archive ?? _lastOutput,
+                    );
+                    break;
+                  default:
+                    await _command(action);
+                }
+              },
+              itemBuilder: (_) => [
+                if (MediaQuery.sizeOf(context).width < 1000)
+                  PopupMenuItem(
+                    value: 'view',
+                    enabled: _selectedFile != null,
+                    child: const Text('查看'),
+                  ),
+                if (MediaQuery.sizeOf(context).width < 940)
+                  PopupMenuItem(
+                    value: 'edit',
+                    enabled: _editable && _selectedFile != null,
+                    child: const Text('编辑'),
+                  ),
+                PopupMenuItem(
+                  value: 'properties',
+                  enabled: _archive != null,
+                  child: const Text('属性'),
+                ),
+                PopupMenuItem(
+                  value: 'nested',
+                  enabled:
+                      _selectedFile != null &&
+                      isNestedArchive(_selectedFile!.normalizedPath),
+                  child: const Text('进入子压缩包'),
+                ),
+                PopupMenuItem(
+                  value: 'parentArchive',
+                  enabled: _archiveParents.isNotEmpty,
+                  child: const Text('返回父压缩包'),
+                ),
+                PopupMenuItem(
+                  value: 'preview',
+                  enabled: _canPreview,
+                  child: const Text('内置预览'),
+                ),
+                PopupMenuItem(
+                  value: 'quick',
+                  enabled: _archive != null,
+                  child: const Text('快速解压到同级目录'),
+                ),
+                PopupMenuItem(
+                  value: 'extractTrash',
+                  enabled: _archive != null && _archiveParents.isEmpty,
+                  child: const Text('解压后移至废纸篓…'),
+                ),
+                PopupMenuItem(
+                  value: 'selected',
+                  enabled: _selected.isNotEmpty,
+                  child: const Text('解压选中项…'),
+                ),
+                const PopupMenuDivider(),
+                PopupMenuItem(
+                  value: 'rename',
+                  enabled: _editable && _selected.length == 1,
+                  child: const Text('重命名…'),
+                ),
+                PopupMenuItem(
+                  value: 'mkdir',
+                  enabled: _editable && _archive != null,
+                  child: const Text('新建文件夹…'),
+                ),
+                PopupMenuItem(
+                  value: 'fileComment',
+                  enabled: _commentEditable && _selectedFile != null,
+                  child: const Text('编辑文件注释…'),
+                ),
+                PopupMenuItem(
+                  value: 'archiveComment',
+                  enabled: _commentEditable,
+                  child: const Text('编辑归档注释…'),
+                ),
+                const PopupMenuItem(value: 'splitFile', child: Text('分割普通文件…')),
+                const PopupMenuItem(value: 'joinFile', child: Text('合并分片…')),
+                const PopupMenuItem(value: 'repairZip', child: Text('修复 ZIP…')),
+                const PopupMenuItem(
+                  value: 'recoverPassword',
+                  child: Text('自有归档密码恢复…'),
+                ),
+                const PopupMenuItem(value: 'checksums', child: Text('校验工具…')),
+                PopupMenuItem(
+                  value: 'updateMode',
+                  enabled: _editable && _archive != null,
+                  child: const Text('更新模式…'),
+                ),
+                PopupMenuItem(
+                  value: 'restore',
+                  enabled: _editable && _archive != null,
+                  child: const Text('恢复原包备份…'),
+                ),
+                PopupMenuItem(
+                  value: 'tree',
+                  child: Text(_showTree ? '隐藏文件树' : '显示文件树'),
+                ),
+                PopupMenuItem(
+                  value: 'finder',
+                  enabled: _archive != null || _lastOutput != null,
+                  child: const Text('在 Finder 显示'),
+                ),
+                const PopupMenuItem(value: 'about', child: Text('关于 F7Zip')),
+                PopupMenuItem(
+                  value: 'close',
+                  enabled: _archive != null,
+                  child: const Text('关闭压缩包'),
+                ),
+              ],
             ),
           ],
         ),
@@ -3558,8 +3614,10 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     child: Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2),
       child: SizedBox(
-        width: label == '新建压缩包' ? 78 : 56,
-        height: 48,
+        width: ['打开', '新建', '解压到…'].contains(label)
+            ? (label == '解压到…' ? 96 : 76)
+            : 36,
+        height: 32,
         child: TextButton(
           onPressed: action,
           style: TextButton.styleFrom(
@@ -3569,14 +3627,17 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
             backgroundColor: emphasized ? AppColors.of(context).tint : null,
             disabledForegroundColor: AppColors.of(context).secondary
                 .withValues(alpha: 0.4),
-            padding: const EdgeInsets.symmetric(vertical: 4),
+            minimumSize: Size.zero,
+            padding: const EdgeInsets.symmetric(horizontal: 6),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(icon, size: 20),
-              const SizedBox(height: 3),
-              Text(label, maxLines: 1, style: const TextStyle(fontSize: 11)),
+              Icon(icon, size: 18),
+              if (['打开', '新建', '解压到…'].contains(label)) ...[
+                const SizedBox(width: 6),
+                Text(label, maxLines: 1, style: const TextStyle(fontSize: 12)),
+              ],
             ],
           ),
         ),

@@ -5,6 +5,7 @@ import 'package:f7zip/archive_engine.dart';
 import 'package:f7zip/main.dart';
 import 'package:f7zip/archive_tree.dart';
 import 'package:f7zip/app_theme.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -108,6 +109,20 @@ void main() {
   });
 
   testWidgets('欢迎页与实际打开压缩包后的文件列表正常显示', (tester) async {
+    // 使用真实桌面布局，覆盖自绘窗口控件占用的宽度。
+    const windowChannel = MethodChannel('sevenzip/window');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      windowChannel,
+      (call) async => call.method == 'state'
+          ? {'focused': true, 'fullScreen': false}
+          : null,
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        windowChannel,
+        null,
+      );
+    });
     await tester.runAsync(() async {
       final font = FontLoader('.AppleSystemUIFont');
       for (final path in [
@@ -216,7 +231,7 @@ void main() {
     await tester.runAsync(() => _capture(key, '/tmp/f7zip-settings-dark.png'));
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('新建压缩包'));
+    await tester.tap(find.text('新建'));
     await tester.pumpAndSettle();
     expect(find.text('选择保存位置'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -258,7 +273,7 @@ void main() {
     expect(find.byKey(const ValueKey('row:欢迎使用.txt')), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
   testWidgets('主题设置持久化、原生外观同步和系统切换保留当前文件选择', (tester) async {
     tester.view.physicalSize = const Size(1120, 740);
     tester.view.devicePixelRatio = 1;

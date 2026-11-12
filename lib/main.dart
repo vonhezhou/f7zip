@@ -1,3 +1,6 @@
+import 'desktop_bridge.dart';
+import 'desktop_drag.dart';
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -26,9 +29,10 @@ import 'welcome_panel.dart';
 import 'checksum_dialog.dart';
 import 'password_recovery_dialog.dart';
 
-const _desktop = MethodChannel('sevenzip/desktop');
+const _desktop = DesktopBridge();
 
-Future<void> main() async {
+Future<void> main(List<String> arguments) async {
+  DesktopBridge.arguments = arguments;
   WidgetsFlutterBinding.ensureInitialized();
   await initializeDesktopWindow();
   runApp(const F7ZipApp());
@@ -60,6 +64,7 @@ class _F7ZipAppState extends State<F7ZipApp> {
 
   @override
   Widget build(BuildContext context) => MaterialApp(
+    navigatorKey: desktopNavigatorKey,
     title: 'F7Zip',
     debugShowCheckedModeBanner: false,
     theme: buildAppTheme(
@@ -107,6 +112,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   final List<String> _navigation = [''];
   int _navigationIndex = 0;
   bool _desktopReady = false;
+  bool _closingDesktop = false;
   AppSettings _preferences = const AppSettings();
   EditWorkspace? _edits;
   String? _workspaceError;
@@ -147,7 +153,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
   final Set<String> _nestedDirectories = {};
 
   bool get _engineAvailable =>
-      _desktopReady && !_busy && !_choosing && _engine != null;
+      _desktopReady &&
+      !_closingDesktop &&
+      !_busy &&
+      !_choosing &&
+      _engine != null;
   bool get _available => _engineAvailable && !_exportingDrag;
 
   bool get _interactive =>
@@ -166,6 +176,18 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       _engineError = '$error';
     }
     _desktop.setMethodCallHandler((call) async {
+      if (call.method == 'desktopShutdown') {
+        _closingDesktop = true;
+        _finderTimer?.cancel();
+        _edits?.close();
+        for (final session in _dragSessions.values) {
+          session.cancelled = true;
+        }
+        _engine?.cancel();
+        await _activeOperation?.future;
+        await _dragExports;
+        await _clearNestedArchives();
+      }
       if (call.method == 'archivePreviewClosed') {
         final arguments = call.arguments as Map;
         await _releasePreview(arguments['id'] as String);
@@ -804,6 +826,49 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     }
   }
 
+  Future<List<String>> _prepareDesktopDrag(_VisibleEntry row) async {
+    if (!_interactive || row.dotEntry || _archive == null) return [];
+    final items = buildArchiveDragItems(
+      _entries,
+      _selected.contains(row.path) ? _selected : {row.path},
+    );
+    if (items.isEmpty) return [];
+    final root = await _desktop.invokeMethod<String>(
+      'createArchiveDragDirectory',
+    );
+    if (root == null || !mounted) return [];
+    final id = '${DateTime.now().microsecondsSinceEpoch}';
+    final session = _ArchiveDragSession(
+      id: id,
+      archive: _archive!,
+      version: _archiveVersion,
+      password: _password,
+      codePage: _archiveCodePage,
+      items: items,
+    );
+    _dragSessions[id] = session;
+    try {
+      final paths = <String>[];
+      for (final item in items) {
+        final path = p.join(root, item.name);
+        await _writeArchivePromise({
+          'session': id,
+          'item': item.id,
+          'destination': path,
+        });
+        paths.add(path);
+      }
+      // 文件管理器可能在结束拖放后才复制源文件，暂存内容保留至退出。
+      return paths;
+    } catch (_) {
+      await _desktop.invokeMethod<void>('discardArchiveDragDirectory', root);
+      rethrow;
+    } finally {
+      session.ended = true;
+      _releaseArchiveDrag(session);
+    }
+  }
+
   void _endArchiveDrag(Map<dynamic, dynamic> arguments) {
     final session = _dragSessions[arguments['session']];
     if (session == null) return;
@@ -1141,7 +1206,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       }
       if (!await _confirm(
         '解压成功后移至废纸篓？',
-        '完整解压成功后，将把 ${p.basename(archive)} 移至 macOS 废纸篓。跳过同名文件、分卷、失败或取消时保留源包。',
+        '完整解压成功后，将把 ${p.basename(archive)} 移至系统回收站。跳过同名文件、分卷、失败或取消时保留源包。',
       )) {
         return false;
       }
@@ -2105,7 +2170,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  '选择修改前的完整版本。恢复会替换整个压缩包，当前版本也会先备份。备份占用磁盘空间，可在 Finder 中手动清理。',
+                  '选择修改前的完整版本。恢复会替换整个压缩包，当前版本也会先备份。备份占用磁盘空间，可在文件管理器中手动清理。',
                 ),
                 const SizedBox(height: 8),
                 Expanded(
@@ -2121,7 +2186,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
                         ),
                         onTap: () => Navigator.pop(context, backup),
                         trailing: IconButton(
-                          tooltip: '在 Finder 显示备份',
+                          tooltip: '在文件管理器中显示备份',
                           icon: const Icon(Icons.folder_open_outlined),
                           onPressed: () => _desktop.invokeMethod<void>(
                             'reveal',
@@ -3207,29 +3272,68 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     });
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.keyO, meta: true): _openDialog,
-        const SingleActivator(LogicalKeyboardKey.keyE, meta: true): _extract,
-        const SingleActivator(LogicalKeyboardKey.keyI, meta: true): _properties,
-        const SingleActivator(LogicalKeyboardKey.keyA, meta: true, shift: true):
-            _addFiles,
-        const SingleActivator(LogicalKeyboardKey.keyN, meta: true, shift: true):
-            _newFolder,
-        const SingleActivator(LogicalKeyboardKey.backspace, meta: true):
-            _removeSelected,
-        const SingleActivator(LogicalKeyboardKey.f2): _renameSelected,
-        const SingleActivator(LogicalKeyboardKey.f3): () => _command('view'),
-        const SingleActivator(LogicalKeyboardKey.f4): () => _command('edit'),
-        const SingleActivator(LogicalKeyboardKey.bracketLeft, meta: true): () =>
+        SingleActivator(
+          LogicalKeyboardKey.keyO,
+          meta: !usesPortableDesktop,
+          control: usesPortableDesktop,
+        ): _openDialog,
+        SingleActivator(
+          LogicalKeyboardKey.keyE,
+          meta: !usesPortableDesktop,
+          control: usesPortableDesktop,
+        ): _extract,
+        SingleActivator(
+          LogicalKeyboardKey.keyI,
+          meta: !usesPortableDesktop,
+          control: usesPortableDesktop,
+        ): _properties,
+        SingleActivator(
+          LogicalKeyboardKey.keyA,
+          meta: !usesPortableDesktop,
+          control: usesPortableDesktop,
+          shift: true,
+        ): _addFiles,
+        SingleActivator(
+          LogicalKeyboardKey.keyN,
+          meta: !usesPortableDesktop,
+          control: usesPortableDesktop,
+          shift: true,
+        ): _newFolder,
+        SingleActivator(
+          LogicalKeyboardKey.backspace,
+          meta: !usesPortableDesktop,
+          control: usesPortableDesktop,
+        ): _removeSelected,
+        SingleActivator(LogicalKeyboardKey.f2): _renameSelected,
+        SingleActivator(LogicalKeyboardKey.f3): () => _command('view'),
+        SingleActivator(LogicalKeyboardKey.f4): () => _command('edit'),
+        SingleActivator(
+          LogicalKeyboardKey.bracketLeft,
+          meta: !usesPortableDesktop,
+          control: usesPortableDesktop,
+        ): () =>
             _moveHistory(-1),
-        const SingleActivator(
+        SingleActivator(
           LogicalKeyboardKey.bracketRight,
-          meta: true,
+          meta: !usesPortableDesktop,
+          control: usesPortableDesktop,
         ): () =>
             _moveHistory(1),
-        const SingleActivator(LogicalKeyboardKey.keyN, meta: true): _create,
-        const SingleActivator(LogicalKeyboardKey.comma, meta: true):
-            _showSettings,
-        const SingleActivator(LogicalKeyboardKey.keyA, meta: true): () {
+        SingleActivator(
+          LogicalKeyboardKey.keyN,
+          meta: !usesPortableDesktop,
+          control: usesPortableDesktop,
+        ): _create,
+        SingleActivator(
+          LogicalKeyboardKey.comma,
+          meta: !usesPortableDesktop,
+          control: usesPortableDesktop,
+        ): _showSettings,
+        SingleActivator(
+          LogicalKeyboardKey.keyA,
+          meta: !usesPortableDesktop,
+          control: usesPortableDesktop,
+        ): () {
           if (archive != null && !_busy) {
             setState(
               () => _selected.addAll(
@@ -3656,7 +3760,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
             const Divider(height: 8),
             item(
               'finder',
-              '在 Finder 显示',
+              '在文件管理器中显示',
               enabled: _archive != null || _lastOutput != null,
             ),
             item('close', '关闭压缩包', enabled: _archive != null),
@@ -3684,7 +3788,9 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     VoidCallback? action, {
     bool emphasized = false,
   }) => Tooltip(
-    message: hint.isEmpty ? label : '$label  $hint',
+    message: hint.isEmpty
+        ? label
+        : '$label  ${usesPortableDesktop ? hint.replaceAll('⇧', 'Shift+').replaceAll('⌘', 'Ctrl+').replaceAll('⌫', 'Backspace') : hint}',
     child: Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2),
       child: SizedBox(
@@ -3960,7 +4066,7 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
     child: Padding(
       padding: const EdgeInsets.all(32),
       child: SelectableText(
-        '原生引擎加载失败\n\n$_engineError\n\n请使用 scripts/build_macos.sh 重新构建完整应用。',
+        '原生引擎加载失败\n\n$_engineError\n\n请使用 python3 scripts/build_desktop.py 重新构建完整应用。',
       ),
     ),
   );
@@ -4282,26 +4388,56 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
                                   ),
                                   const SizedBox(width: 11),
                                   Expanded(
-                                    child: GestureDetector(
-                                      key: ValueKey('drag:${row.path}'),
-                                      behavior: HitTestBehavior.opaque,
-                                      onPanStart: !_interactive || row.dotEntry
-                                          ? null
-                                          : (_) => _startArchiveDrag(row),
-                                      child: Text(
-                                        _query.isEmpty
-                                            ? p.posix.basename(row.path)
-                                            : row.path,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: selected
-                                              ? AppColors.of(context)
-                                                    .onSelection
-                                              : AppColors.of(context).text,
-                                        ),
-                                      ),
-                                    ),
+                                    child:
+                                        usesPortableDesktop &&
+                                            _interactive &&
+                                            !row.dotEntry
+                                        ? DesktopArchiveDrag(
+                                            key: ValueKey('drag:${row.path}'),
+                                            prepare: () =>
+                                                _prepareDesktopDrag(row),
+                                            onError: (error) {
+                                              if (mounted) {
+                                                unawaited(_error(error));
+                                              }
+                                            },
+                                            child: Text(
+                                              _query.isEmpty
+                                                  ? p.posix.basename(row.path)
+                                                  : row.path,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                color: selected
+                                                    ? AppColors.of(context)
+                                                          .onSelection
+                                                    : AppColors.of(context)
+                                                          .text,
+                                              ),
+                                            ),
+                                          )
+                                        : GestureDetector(
+                                            key: ValueKey('drag:${row.path}'),
+                                            behavior: HitTestBehavior.opaque,
+                                            onPanStart:
+                                                !_interactive || row.dotEntry
+                                                ? null
+                                                : (_) => _startArchiveDrag(row),
+                                            child: Text(
+                                              _query.isEmpty
+                                                  ? p.posix.basename(row.path)
+                                                  : row.path,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                color: selected
+                                                    ? AppColors.of(context)
+                                                          .onSelection
+                                                    : AppColors.of(context)
+                                                          .text,
+                                              ),
+                                            ),
+                                          ),
                                   ),
                                   if (entry?.encrypted == true)
                                     Padding(
@@ -4567,7 +4703,11 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
             child: const Text('查看结果', style: TextStyle(fontSize: 10)),
           ),
         Text(
-          'macOS · 0.2.2',
+          '${Platform.isWindows
+              ? 'Windows'
+              : Platform.isLinux
+              ? 'Linux'
+              : 'macOS'} · 0.2.2',
           style: TextStyle(
             fontSize: 10,
             color: AppColors.of(context).secondary,

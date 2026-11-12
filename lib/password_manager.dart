@@ -1,9 +1,9 @@
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-
+import 'desktop_bridge.dart';
 import 'password_history_dialog.dart';
 
-const _desktop = MethodChannel('sevenzip/desktop');
+import 'package:flutter/material.dart';
+
+const _desktop = DesktopBridge();
 
 class PasswordManager extends StatefulWidget {
   const PasswordManager({super.key});
@@ -88,8 +88,10 @@ class _PasswordManagerState extends State<PasswordManager> {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      const Text(
-        '常用密码保存在本机 macOS 钥匙串中。最多保存 20 项，读取受钥匙串访问授权控制。',
+      Text(
+        usesPortableDesktop
+            ? '常用密码保存在系统安全存储中，最多保存 20 项。Linux 需要可用的 Secret Service。'
+            : '常用密码保存在本机 macOS 钥匙串中。最多保存 20 项，读取受钥匙串访问授权控制。',
         style: TextStyle(fontSize: 12),
       ),
       Row(
@@ -262,7 +264,13 @@ class _PasswordEditorState extends State<_PasswordEditor> {
         ),
         FilledButton(
           onPressed: _saving ? null : _save,
-          child: Text(_saving ? '保存中…' : '保存到钥匙串'),
+          child: Text(
+            _saving
+                ? '保存中…'
+                : usesPortableDesktop
+                ? '保存到系统安全存储'
+                : '保存到钥匙串',
+          ),
         ),
       ],
     ),

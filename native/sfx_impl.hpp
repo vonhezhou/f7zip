@@ -10,24 +10,9 @@ static bool hasSfxPrefix(const localfs::path& path) {
 
 static void validateSfxInputs(const std::vector<std::pair<std::string, std::string>>& inputs) {
     std::map<std::string, std::string> names;
-    const std::set<std::string> devices = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"};
     for (const auto& [source, name] : inputs) {
         if (localfs::is_symlink(localfs::symlink_status(source))) throw std::runtime_error("Windows SFX 创建暂不携带符号链接，请选择普通文件或目录");
-        for (const auto& component : localfs::path(name)) {
-            const auto text = component.string();
-            if (text.empty() || text.back() == '.' || text.back() == ' ' ||
-                text.find_first_of("<>:\"|?*\\") != std::string::npos ||
-                std::any_of(text.begin(), text.end(), [](unsigned char value) { return value < 32; })) {
-                throw std::runtime_error("来源包含 Windows 不支持的文件名。" + name);
-            }
-            const auto key = windowsFilenameKey(text);
-            const auto base = key.substr(0, key.find('.'));
-            const auto numberedDevice = base.size() == 4 &&
-                (base.substr(0, 3) == "COM" || base.substr(0, 3) == "LPT") && base[3] >= '1' && base[3] <= '9';
-            const auto superscriptDevice = base == "COM¹" || base == "COM²" || base == "COM³" ||
-                base == "LPT¹" || base == "LPT²" || base == "LPT³";
-            if (devices.count(base) || numberedDevice || superscriptDevice) throw std::runtime_error("来源包含 Windows 保留设备名。" + name);
-        }
+        validateWindowsArchivePath(name);
         for (auto path = localfs::path(name); !path.empty(); path = path.parent_path()) {
             const auto raw = path.generic_string();
             const auto [found, inserted] = names.emplace(windowsFilenameKey(raw), raw);

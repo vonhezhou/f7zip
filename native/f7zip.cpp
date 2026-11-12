@@ -23,12 +23,6 @@
 #include <string>
 #include <vector>
 #include <stdio.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <sys/file.h>
-#include <fcntl.h>
-#include <limits.h>
-#include <copyfile.h>
 #include <map>
 #include <regex>
 #include <set>
@@ -36,11 +30,11 @@
 #include <deque>
 #include <fstream>
 #include <array>
-#include <CommonCrypto/CommonDigest.h>
-#include <sys/xattr.h>
+#include "native_platform.hpp"
 
 namespace localfs = std::filesystem;
 using namespace bit7z;
+#include "windows_filename.hpp"
 
 struct Job {
     uint32_t codePage = 0;
@@ -121,15 +115,14 @@ public:
         char* created = mkdtemp(buffer.data());
         if (!created) throw std::runtime_error("无法创建临时目录，请检查目标目录权限与磁盘空间");
         path = created;
-        descriptor = open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        descriptor = openPrivateDirectory(path);
         if (descriptor < 0) {
             localfs::remove(path);
             throw std::runtime_error("无法打开临时目录");
         }
     }
     localfs::path currentPath() const {
-        char buffer[PATH_MAX];
-        return fcntl(descriptor, F_GETPATH, buffer) == 0 ? localfs::path(buffer) : path;
+        return descriptorPath(descriptor, path);
     }
     ~StagingDirectory() {
         std::error_code ignored;
@@ -139,7 +132,7 @@ public:
             // 描述符失去可用路径时，避免清理后来占用原名称的其他目录。
             if (fstat(descriptor, &opened) == 0 && lstat(current.c_str(), &linked) == 0 &&
                 opened.st_dev == linked.st_dev && opened.st_ino == linked.st_ino && S_ISDIR(linked.st_mode)) {
-                localfs::remove_all(current, ignored);
+                removePrivateTree(current, ignored);
             }
         }
         close(descriptor);
@@ -255,6 +248,9 @@ static void validateEntry(const BitArchiveItemInfo& item, bool allowLinks = fals
     for (const auto& part : path) {
         if (part == "..") throw std::runtime_error("压缩包包含越界文件路径");
     }
+#ifdef _WIN32
+    validateWindowsArchivePath(path.generic_string());
+#endif
     const auto posix = item.itemProperty(BitProperty::PosixAttrib);
     const mode_t mode = posix.isUInt32() ? posix.getUInt32() : item.attributes() >> 16U;
     const mode_t type = mode & S_IFMT;
@@ -266,9 +262,9 @@ static void validateEntry(const BitArchiveItemInfo& item, bool allowLinks = fals
     }
 }
 
-static std::string archiveVersion(const char* path) {
+static std::string archiveVersion(const localfs::path& path) {
     struct stat info{};
-    if (stat(path, &info) != 0 || !S_ISREG(info.st_mode)) {
+    if (stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) {
         throw std::runtime_error("无法读取压缩包文件状态");
     }
     return std::to_string(info.st_dev) + ":" + std::to_string(info.st_ino) + ":" +
@@ -297,7 +293,7 @@ static std::string volumeFamily(const std::string& name) {
     return {};
 }
 
-static std::string volumeVersion(const char* archive) {
+static std::string volumeVersion(const localfs::path& archive) {
     const auto path = localfs::absolute(archive);
     const auto family = volumeFamily(path.filename().string());
     if (family.empty()) return archiveVersion(archive);
@@ -383,7 +379,7 @@ static std::string archiveComment(BitArchiveReader& reader) {
 class ArchiveLock {
 public:
     int descriptor;
-    explicit ArchiveLock(const char* path) : descriptor(open(path, O_RDONLY | O_NOFOLLOW)) {
+    explicit ArchiveLock(const localfs::path& path) : descriptor(openArchiveLock(path)) {
         if (descriptor < 0) throw std::runtime_error("无法打开待写入的位置，请检查目录或压缩包权限");
         if (flock(descriptor, LOCK_EX | LOCK_NB) != 0) {
             close(descriptor);
@@ -452,7 +448,12 @@ static std::string recordUnicodePath(std::map<std::string, std::string>& paths, 
     const auto normalized = normalizeUnicodeName(name, mode);
     for (auto path = localfs::path(name); !path.empty(); path = path.parent_path()) {
         const auto raw = path.generic_string();
-        const auto key = normalizeUnicodeName(raw, mode);
+        const auto key =
+#ifdef _WIN32
+            windowsFilenameKey(raw);
+#else
+            normalizeUnicodeName(raw, mode);
+#endif
         const auto [found, inserted] = paths.emplace(key, raw);
         if (!inserted && found->second != raw) {
             throw std::runtime_error("Unicode 文件名规范化后存在重名（" + found->second + " / " + raw + "）");
@@ -462,6 +463,7 @@ static std::string recordUnicodePath(std::map<std::string, std::string>& paths, 
 }
 
 static bool hasMacMetadata(const localfs::path& source) {
+#ifdef __APPLE__
     const auto size = listxattr(source.c_str(), nullptr, 0, XATTR_NOFOLLOW);
     if (size < 0) throw std::runtime_error("无法读取源文件扩展属性");
     if (size == 0) return false;
@@ -476,6 +478,9 @@ static bool hasMacMetadata(const localfs::path& source) {
         offset += name.size() + 1;
     }
     return false;
+#else
+    return false;
+#endif
 }
 
 static localfs::path packMacMetadata(const localfs::path& source, const localfs::path& staging, size_t index) {
@@ -655,6 +660,7 @@ static void validateAppleDouble(const localfs::path& sidecar, uint64_t size) {
 }
 
 static void restoreMacMetadata(const localfs::path& staging, const std::vector<BitArchiveItemInfo>& items, Job* job) {
+#ifdef __APPLE__
     std::map<std::string, std::string> targets;
     for (const auto& item : items) recordUnicodePath(targets, logicalPath(item.path(), true), 2);
     for (const auto& item : items) {
@@ -684,6 +690,7 @@ static void restoreMacMetadata(const localfs::path& staging, const std::vector<B
             parent = parent.parent_path();
         }
     }
+#endif
 }
 
 // 链接最后创建，解码器只写入普通文件，避免利用链接条目重定向后续写入。
@@ -743,7 +750,7 @@ public:
             if (chmod(target.c_str(), mode) != 0) throw std::runtime_error("无法恢复文件权限");
             return;
         }
-        const int descriptor = open(target.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        const int descriptor = openPrivateDirectory(target);
         if (descriptor < 0) throw std::runtime_error("无法打开待恢复权限的文件夹");
         struct stat status{};
         if (fstat(descriptor, &status) != 0) { close(descriptor); throw std::runtime_error("无法读取文件夹权限"); }
@@ -953,11 +960,24 @@ public:
     void verify() const {
         struct stat current{};
         if (parent) parent->verify();
+#ifdef _WIN32
+        // Windows 目录句柄禁止删除共享，持有期间目录无法被替换，直接核对句柄身份。
+        const int status = fstat(descriptor, &current);
+#else
         const int status = parent
             ? fstatat(parent->descriptor, name.c_str(), &current, AT_SYMLINK_NOFOLLOW)
             : lstat(root.c_str(), &current);
+#endif
         if (status != 0 || current.st_dev != identity.st_dev || current.st_ino != identity.st_ino || !S_ISDIR(current.st_mode)) {
+#ifdef _WIN32
+            throw std::runtime_error("解压目标目录已变化，请检查后重试。" + root.u8string() + name +
+                " (status=" + std::to_string(status) + ", errno=" + std::to_string(errno) +
+                ", expected=" + std::to_string(identity.st_dev) + "/" + std::to_string(identity.st_ino) +
+                ", current=" + std::to_string(current.st_dev) + "/" + std::to_string(current.st_ino) +
+                ", mode=" + std::to_string(current.st_mode) + ")");
+#else
             throw std::runtime_error("解压目标目录已变化，请检查后重试");
+#endif
         }
     }
 private:
@@ -1021,6 +1041,7 @@ static void extractionVersions(const localfs::path& source, const std::shared_pt
 
 struct ExtractionMove {
     localfs::path source;
+    localfs::path stagedName;
     std::shared_ptr<ExtractionDirectory> directory;
     std::string name;
     struct stat expected{};
@@ -1074,7 +1095,7 @@ static void planExtraction(const localfs::path& source, const std::shared_ptr<Ex
             conflicts.push_back((relative / original).string());
             continue;
         }
-        moves.push_back({entry.path(), directory, name, existing, {}, exists && policy == 4, false});
+        moves.push_back({entry.path(), relative / original, directory, name, existing, {}, exists && policy == 4, false});
     }
 }
 
@@ -1141,7 +1162,10 @@ static localfs::path publishExtraction(
     if (!conflicts.empty()) throw ExtractionConflict(std::move(conflicts), version);
     const auto publishedLinks = preparePublishedLinks(source, moves);
     const auto publishedOutput = outputRelative.empty() ? localfs::path{} : publishedExtractionPath(source / outputRelative, source, moves);
-    std::set<std::pair<dev_t, ino_t>> inputs;
+#ifdef _WIN32
+    f7win::needsStagingRecovery = false;
+#endif
+    std::set<std::pair<uint64_t, uint64_t>> inputs;
     const auto archivePath = localfs::absolute(archive);
     const auto family = volumeFamily(archivePath.filename().string());
     for (const auto& entry : localfs::directory_iterator(archivePath.parent_path())) {
@@ -1169,7 +1193,10 @@ static localfs::path publishExtraction(
             if (!move.replace && (status == 0 || errno != ENOENT)) {
                 throw std::runtime_error("发布期间出现同名项目，请检查后重试");
             }
-            const auto stagedName = move.source.lexically_relative(source);
+            const auto& stagedName = move.stagedName;
+            if (stagedName.empty() || stagedName == "." || stagedName.is_absolute() || *stagedName.begin() == "..") {
+                throw std::runtime_error("暂存文件相对路径无效，已停止发布");
+            }
             if (fstatat(stagedRoot.descriptor, stagedName.c_str(), &move.published, AT_SYMLINK_NOFOLLOW) != 0) throw std::runtime_error("无法读取暂存结果");
             // 交换后旧文件保留在私有暂存目录，直到整组发布成功。
             const unsigned int flags = move.replace ? RENAME_SWAP : RENAME_EXCL;
@@ -1202,7 +1229,7 @@ static localfs::path publishExtraction(
         for (auto iterator = moves.rbegin(); iterator != moves.rend(); ++iterator) {
             auto& move = *iterator;
             if (!move.committed) continue;
-            const auto stagedName = move.source.lexically_relative(source);
+            const auto& stagedName = move.stagedName;
             struct stat current{};
             if (fstatat(move.directory->descriptor, move.name.c_str(), &current, AT_SYMLINK_NOFOLLOW) != 0 ||
                 !sameExtractedFile(move.published, current, true) ||
@@ -1211,6 +1238,9 @@ static localfs::path publishExtraction(
                 restored = false;
             }
         }
+#ifdef _WIN32
+        restored = restored && !f7win::needsStagingRecovery;
+#endif
         if (!restored) {
             // 回滚受外部写入阻挡时，保留旧文件，避免清理暂存目录造成数据丢失。
             staging.preserve = true;
@@ -2300,8 +2330,15 @@ static char* mutateArchive(
         validateMutationSources(sourceVersions, job);
         // 从此处开始即使发布失败也保留备份，便于手动恢复。
         backup.preserve = true;
-        if (rename(modified.c_str(), target.c_str()) != 0) {
+        if (replaceArchive(modified, target) != 0) {
+#ifdef _WIN32
+            const DWORD error = GetLastError();
+            throw std::runtime_error("无法替换原压缩包，已保留编辑文件。Windows error=" + std::to_string(error) +
+                ", source attributes=" + std::to_string(GetFileAttributesW(modified.c_str())) +
+                ", target attributes=" + std::to_string(GetFileAttributesW(target.c_str())));
+#else
             throw std::runtime_error("无法替换原压缩包，已保留编辑文件");
+#endif
         }
         return result("{\"ok\":true,\"editable\":true,\"version\":" + quote(archiveVersion(archive)) +
             ",\"backup\":" + quote(backupFile.string()) +

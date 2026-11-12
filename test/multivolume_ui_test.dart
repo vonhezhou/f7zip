@@ -70,7 +70,7 @@ void main() {
       tester
           .widget<TextButton>(
             find.ancestor(
-              of: find.text('添加'),
+              of: find.byIcon(Icons.add_box_outlined),
               matching: find.byType(TextButton),
             ),
           )

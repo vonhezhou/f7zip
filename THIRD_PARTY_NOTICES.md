@@ -11,10 +11,15 @@ F7Zip 自有代码使用 MIT。下列组件继续适用各自许可证。
 | Flutter / Dart | 以构建环境和 `pubspec.lock` 为准 | BSD-3-Clause | https://github.com/flutter/flutter |
 | desktop_drop | 以 `pubspec.lock` 为准 | MIT | https://pub.dev/packages/desktop_drop |
 | ffi / path / crypto | 以 `pubspec.lock` 为准 | BSD-3-Clause | https://pub.dev/publishers/dart.dev/packages |
+| file_selector / path_provider / url_launcher | 以 `pubspec.lock` 为准 | BSD-3-Clause | https://github.com/flutter/packages |
+| window_manager / flutter_secure_storage | 以 `pubspec.lock` 为准 | MIT、BSD-3-Clause，依组件声明 | https://pub.dev/packages/flutter_secure_storage |
+| media_kit / super_drag_and_drop / pdfrx | 以 `pubspec.lock` 为准 | MIT | https://pub.dev/packages/media_kit |
+| ICU（Windows、Linux） | 以目标系统开发包为准 | Unicode、ICU 及附带第三方声明 | https://github.com/unicode-org/icu |
+| nlohmann/json（Windows、Linux） | 以目标系统开发包为准 | MIT | https://github.com/nlohmann/json |
 
 7-Zip 构建时通过 `scripts/build_native.py` 应用 ZIP 文件名编码、注释保留及 RAR 注释读取补充，转换实现位于 `native/7zip_codepage.hpp` 和 `native/7zip_rar_comments.hpp`。源码包保留经校验的原始 7-Zip 归档、补充代码与可重复应用的构建步骤。bit7z 构建时以 `native/bit7z_genericinputitem.cpp` 替换原 `genericinputitem.cpp`，补齐 TAR 写入的 POSIX 权限属性；以 `native/bit7z_stringutil.cpp` 替换原 `stringutil.cpp`，兼容 POSIX 中的 UTF-16 代理对与 UTF-32 字符串。这些修改文件保留原版权声明和 MPL-2.0 许可证，并随源码包分发。桥接层位于 `native/f7zip.cpp` 与 `native/zip_encoding.mm`。7-Zip 共享库在运行时动态加载，bit7z 编译进桥接动态库。
 
-应用包在 `Contents/Resources/F7ZipLicenses` 中保留 7-Zip、LGPL 和 bit7z 的许可证全文。Flutter 依赖许可证由 Flutter 的构建流程收集到应用资源中。运行 `scripts/build_macos.sh` 时，还会生成包含项目代码与固定版本第三方源码的 `dist/F7Zip-sources.tar.gz`。重新分发时应同时提供对应源码与许可证。
+macOS 应用包在 `Contents/Resources/F7ZipLicenses` 中保留 7-Zip、LGPL 和 bit7z 的许可证全文。Windows 包在 `licenses`、Linux 包在 `lib/licenses` 中保留原生依赖许可证。Windows、Linux 的 SHA-256 复用 7-Zip 的公开领域实现。Flutter 依赖许可证由 Flutter 的构建流程收集到应用资源中。媒体和 PDF 预览使用插件提供的 libmpv、PDFium 及其依赖，适用其随附声明，Linux 的 libmpv 由系统包提供。运行桌面打包脚本时，还会生成包含项目代码与固定版本 7-Zip、bit7z 原始源码的 `dist/F7Zip-sources.tar.gz`。重新分发时应同时提供对应源码与许可证。
 
 SFX 模块保存在 `native/sfx/7z-x86.sfx`，来源、PE 架构与摘要见该目录的 `README.md`。构建与创建时验证固定摘要，应用资源中分发原模块，对应完整源码与许可证随源码包提供。bit7z 字符串桥接为 SFX 任务增加 UTF-16 密码作用域，沿用原 MPL-2.0 声明。
 

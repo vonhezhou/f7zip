@@ -66,7 +66,7 @@ auto narrow( const wchar_t* wideString, size_t size ) -> std::string {
     WideCharToMultiByte( CODEPAGE,
                          CODEPAGE_WC_FLAGS,
                          wideString,
-                         -1,
+                         static_cast< int >( size ),
                          &result[ 0 ],  // NOLINT(readability-container-data-pointer)
                          static_cast< int >( narrowStringSize ),
                          nullptr,
@@ -160,6 +160,10 @@ auto widen_archive_text( const std::string& value ) -> std::wstring {
     return result;
 }
 
+#elif defined( _WIN32 )
+auto widen_archive_text( const std::string& value ) -> std::wstring {
+    return widen( value );
+}
 #endif
 
 } // namespace bit7z

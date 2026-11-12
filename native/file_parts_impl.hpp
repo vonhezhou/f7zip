@@ -46,7 +46,7 @@ public:
         }
     }
     void attributes(const FilePartsInfo& info) {
-        const struct timespec times[2] = {{0, UTIME_OMIT}, {info.modified, info.modifiedNanoseconds}};
+        const struct timespec times[2] = {{0, UTIME_OMIT}, {info.modified, static_cast<long>(info.modifiedNanoseconds)}};
         if (fchmod(descriptor, info.permissions) != 0 || futimens(descriptor, times) != 0) {
             throw std::runtime_error("无法恢复合并文件的权限及修改时间");
         }
@@ -226,6 +226,10 @@ static std::string splitPlainFile(Job* job, const char* sourceValue, const char*
     struct stat stagedIdentity{};
     if (fstat(staging.descriptor, &stagedIdentity) != 0) throw std::runtime_error("无法验证暂存目录");
     publishExtraction(staging.currentPath(), target.parent_path(), job, staging, source, targetIdentity, permissions, sourceVolumes, {}, &stagedIdentity);
+    if (!localfs::is_regular_file(manifest)) {
+        staging.preserve = true;
+        throw std::runtime_error("分片发布后清单不可用，请核对输出目录与暂存结果。" + staging.currentPath().string());
+    }
     permissions.commit();
     return filePartsSummary(info, manifest, mutationSourceVersion(manifest), target.parent_path() / info.parts.front().name);
 }

@@ -43,7 +43,7 @@ void main() {
     await tester.pumpWidget(const F7ZipApp());
     await _until(tester, () => find.text('只读浏览').evaluate().isNotEmpty);
     final addButton = tester.widget<TextButton>(
-      find.ancestor(of: find.text('添加'), matching: find.byType(TextButton)),
+      find.ancestor(of: find.byIcon(Icons.add_box_outlined), matching: find.byType(TextButton)),
     );
     expect(addButton.onPressed, isNull);
     await tester.tap(find.text('解压到…'));

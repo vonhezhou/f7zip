@@ -281,20 +281,30 @@ class ArchiveFailure implements Exception {
   String toString() => message;
 }
 
+String get _bridgeLibrary => Platform.isWindows
+    ? 'f7zip.dll'
+    : Platform.isLinux
+    ? 'libf7zip.so'
+    : 'libf7zip.dylib';
+
 class ArchiveEngine {
   ArchiveEngine() {
     final override = Platform.environment['F7ZIP_NATIVE_DIR'];
     directory =
         override ??
-        p.normalize(
-          p.join(
-            p.dirname(Platform.resolvedExecutable),
-            '..',
-            'Frameworks',
-            'F7Zip',
-          ),
-        );
-    _library = DynamicLibrary.open(p.join(directory, 'libf7zip.dylib'));
+        (Platform.isWindows
+            ? p.dirname(Platform.resolvedExecutable)
+            : Platform.isLinux
+            ? p.join(p.dirname(Platform.resolvedExecutable), 'lib')
+            : p.normalize(
+                p.join(
+                  p.dirname(Platform.resolvedExecutable),
+                  '..',
+                  'Frameworks',
+                  'F7Zip',
+                ),
+              ));
+    _library = DynamicLibrary.open(p.join(directory, _bridgeLibrary));
     _create = _library.lookupFunction<_CreateNative, _Create>('f7_job_create');
     _destroy = _library.lookupFunction<_JobNative, _Job>('f7_job_destroy');
     _cancel = _library.lookupFunction<_JobNative, _Job>('f7_job_cancel');
@@ -363,7 +373,7 @@ Map<String, dynamic> _execute(
   int address,
   ArchiveRequest request,
 ) {
-  final library = DynamicLibrary.open(p.join(directory, 'libf7zip.dylib'));
+  final library = DynamicLibrary.open(p.join(directory, _bridgeLibrary));
   final run = library.lookupFunction<_RunNative, _Run>('f7_run');
   final free = library.lookupFunction<_FreeNative, _Free>('f7_free');
   return using((arena) {
@@ -422,7 +432,9 @@ Map<String, dynamic> _execute(
         request.parameters.solidMiB,
       );
     }
-    final engine = utf8(p.join(directory, '7z.so'));
+    final engine = utf8(
+      p.join(directory, Platform.isWindows ? '7z.dll' : '7z.so'),
+    );
     Pointer<Utf8> response;
     if (request.operation == 'update') {
       final update = library.lookupFunction<_UpdateNative, _Update>(

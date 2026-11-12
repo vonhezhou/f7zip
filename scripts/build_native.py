@@ -3,11 +3,14 @@
 import concurrent.futures
 import hashlib
 import os
+import platform
+import re
 from pathlib import Path
 import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +24,7 @@ ENGINE_PATCH = hashlib.sha256(CODEPAGE_HEADER.read_bytes() + RAR_COMMENTS_HEADER
 ENGINE = VENDOR / f'7zip-{ENGINE_VERSION}-{ENGINE_PATCH}'
 BIT7Z = VENDOR / 'bit7z'
 LIB = ROOT / 'native/lib'
-OBJECTS = VENDOR / f'objects-{ENGINE_VERSION}-{ENGINE_PATCH}'
+OBJECTS = VENDOR / f'objects-{platform.system()}-{platform.machine()}-{ENGINE_VERSION}-{ENGINE_PATCH}'
 SOURCE_HASH = 'a4e374c8f864f51df48c2cfd0e1413ec3b2ea030deae852d6a655402ebb61ac4'
 BIT7Z_SOURCE_HASH = '5a79f9cd2f7bc17ae4088a6b7ac9b5b08476082c1404c98c50ae52aa441559ae'
 BIT7Z_COMMIT = '0f03717920442abcdba80183534931c867feb9c0'
@@ -29,6 +32,29 @@ BIT7Z_COMMIT = '0f03717920442abcdba80183534931c867feb9c0'
 
 def run(args, **kwargs):
     subprocess.run([str(arg) for arg in args], check=True, **kwargs)
+
+
+def bundle_windows_dependencies():
+    """从构建工具链递归收集实际引用的 DLL，避免发布包依赖 MSYS2 的 PATH。"""
+    directory = ROOT / 'native/lib'
+    pending = list(directory.glob('*.dll')) + list(directory.glob('*.exe'))
+    visited = set()
+    search_paths = [Path(value.strip('"')) for value in os.environ.get('PATH', '').split(os.pathsep) if value]
+    while pending:
+        binary = pending.pop()
+        if binary.name.lower() in visited:
+            continue
+        visited.add(binary.name.lower())
+        imports = subprocess.check_output(['objdump', '-p', str(binary)], text=True)
+        for name in re.findall(r'DLL Name:\s*(\S+)', imports):
+            source = next((path / name for path in search_paths if (path / name).is_file()), None)
+            if source is None or source.parent.name.lower() == 'system32':
+                continue
+            target = directory / name
+            if not target.exists():
+                shutil.copy2(source, target)
+                pending.append(target)
+
 
 
 def main():
@@ -187,8 +213,18 @@ def main():
             with tarfile.open(bundled_bit7z) as source:
                 source.extractall(VENDOR)
         else:
-            run(['git', 'clone', '--depth', '1', '--branch', 'v4.0.10',
-                 'https://github.com/rikyoz/bit7z.git', BIT7Z])
+            for attempt in range(3):
+                try:
+                    with tempfile.TemporaryDirectory(prefix='.bit7z-', dir=VENDOR) as directory:
+                        downloaded = Path(directory) / 'bit7z'
+                        run(['git', 'clone', '--depth', '1', '--branch', 'v4.0.10',
+                             'https://github.com/rikyoz/bit7z.git', downloaded])
+                        downloaded.rename(BIT7Z)
+                    break
+                except subprocess.CalledProcessError:
+                    if attempt == 2:
+                        raise
+                    time.sleep(2)
     if (BIT7Z / '.git').exists():
         commit = subprocess.check_output(['git', '-C', str(BIT7Z), 'rev-parse', 'HEAD'], text=True).strip()
         if commit != BIT7Z_COMMIT:
@@ -209,47 +245,119 @@ def main():
     if content != string_header.read_bytes():
         string_header.chmod(string_header.stat().st_mode | 0o200)
         string_header.write_bytes(content)
+    # macOS 15 的 libc++ 无缓冲文件流逐字节读写，分卷处理会产生数百万次系统调用。
+    for filename in ('cfileinstream.cpp', 'cfileoutstream.cpp'):
+        stream_source = BIT7Z / 'src/internal' / filename
+        content = stream_source.read_bytes()
+        before = b'    mFileStream.rdbuf()->pubsetbuf( nullptr, 0 );'
+        after = b'#ifndef __APPLE__\n' + before + b'\n#endif'
+        if after not in content:
+            if content.count(before) != 2:
+                raise RuntimeError('bit7z 文件流缓冲补丁上下文不匹配')
+            content = content.replace(before, after)
+        if filename == 'cfileoutstream.cpp':
+            before = b'    std::error_code error;\n    fs::resize_file('
+            after = (b'#ifdef __APPLE__\n    mFileStream.flush();\n'
+                     b'    if ( mFileStream.fail() ) return E_FAIL;\n#endif\n' + before)
+            if after not in content:
+                if content.count(before) != 1:
+                    raise RuntimeError('bit7z 文件流截断补丁上下文不匹配')
+                content = content.replace(before, after)
+        if content != stream_source.read_bytes():
+            stream_source.chmod(stream_source.stat().st_mode | 0o200)
+            stream_source.write_bytes(content)
+    output_source = BIT7Z / 'src/internal/cstdoutstream.cpp'
+    content = output_source.read_bytes()
+    before = b'    if ( processedSize != nullptr ) {\n        *processedSize = static_cast< uint32_t >( mOutputStream.tellp() - oldPos );'
+    after = (b'#ifdef __APPLE__\n    mOutputStream.flush();\n#endif\n\n' + before)
+    if after not in content:
+        if content.count(before) != 1:
+            raise RuntimeError('bit7z 文件流写入检查补丁上下文不匹配')
+        # 每次块写入后检查实际落盘错误，避免析构时刷新失败仍报告成功。
+        output_source.chmod(output_source.stat().st_mode | 0o200)
+        output_source.write_bytes(content.replace(before, after))
     bundle = ENGINE / 'CPP/7zip/Bundles/Format7zF'
-    deployment_stamp = bundle / '_o/f7zip-deployment-12'
+    macos = platform.system() == 'Darwin'
+    windows = platform.system() == 'Windows'
+    compiler = os.environ.get('CXX', 'clang++' if macos or windows else 'g++')
+    c_compiler = os.environ.get('CC', 'clang' if macos or windows else 'gcc')
+    deployment_stamp = bundle / f'_o/f7zip-{platform.system()}-{platform.machine()}'
     if not deployment_stamp.exists():
         shutil.rmtree(bundle / '_o', ignore_errors=True)
-    build_env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET='12.0')
-    run(['make', '-j8', '-f', 'makefile.gcc', 'CXX=clang++', 'CC=clang', 'LIB2=-lpthread -ldl -liconv'], cwd=bundle, env=build_env)
+    build_env = dict(os.environ)
+    if macos:
+        build_env['MACOSX_DEPLOYMENT_TARGET'] = '12.0'
+    make_arguments = ['make', f'-j{min(os.cpu_count() or 2, 8)}', '-f', 'makefile.gcc', f'CXX={compiler}', f'CC={c_compiler}']
+    if windows:
+        # 引擎与桥接共享 C++ 运行库，打包时递归收集所需 DLL。
+        make_arguments += ['IS_MINGW=1', 'IS_X64=1', 'LDFLAGS_STATIC_2=']
+    else:
+        make_arguments += ['LIB2=-lpthread -ldl' + (' -liconv' if macos else '')]
+    run(make_arguments, cwd=bundle, env=build_env)
     deployment_stamp.touch()
-    shutil.copy2(bundle / '_o/7z.so', LIB / '7z.so')
-    flags = ['-std=c++17', '-O2', '-fPIC', '-mmacosx-version-min=12.0',
+    engine_name = '7z.dll' if windows else '7z.so'
+    shutil.copy2(bundle / '_o' / engine_name, LIB / engine_name)
+    flags = ['-std=c++17', '-O2', '-fPIC',
              '-DBIT7Z_AUTO_FORMAT', '-DBIT7Z_DETECT_FROM_EXTENSION', '-DUNICODE', '-D_UNICODE',
              '-D_LARGEFILE64_SOURCE', '-D_LARGEFILE_SOURCE', '-D_REENTRANT',
-             '-DEXTERNAL_CODECS', '-DENV_UNIX', '-DBREAK_HANDLER', '-DUSE_WIN_FILE',
+             '-DEXTERNAL_CODECS', '-DBREAK_HANDLER', '-DUSE_WIN_FILE',
              '-I' + str(BIT7Z / 'include'), '-I' + str(BIT7Z / 'include/bit7z'),
-             '-I' + str(BIT7Z / 'src'), '-I' + str(ENGINE / 'CPP')]
+             '-I' + str(BIT7Z / 'src'), '-I' + str(ENGINE / 'CPP'), '-I' + str(ENGINE)]
+    if macos:
+        flags += ['-mmacosx-version-min=12.0']
+    if not windows:
+        flags += ['-DENV_UNIX']
+    if windows:
+        flags += ['-DNOMINMAX', '-D_WIN32_WINNT=0x0A00']
+    libraries = []
+    if not macos:
+        packages = ['icu-uc', 'icu-i18n'] + ([] if windows else ['gio-2.0'])
+        flags += subprocess.check_output(['pkg-config', '--cflags', *packages], text=True).split()
+        libraries = subprocess.check_output(['pkg-config', '--libs', *packages], text=True).split()
+        libraries += ['-lole32', '-loleaut32', '-lshell32', '-luuid', '-ladvapi32'] if windows else ['-ldl', '-lpthread']
     # 使用保留 MPL 许可证的本地实现，向 TAR 写入器提供 POSIX 权限。
     sources = [source for source in sorted((BIT7Z / 'src').rglob('*.cpp'))
                if source not in {BIT7Z / 'src/internal/genericinputitem.cpp',
                                  BIT7Z / 'src/internal/stringutil.cpp'}]
     sources += [ROOT / 'native/bit7z_genericinputitem.cpp',
                 ROOT / 'native/bit7z_stringutil.cpp',
-                ROOT / 'native/f7zip.cpp', ROOT / 'native/zip_encoding.mm',
-                ROOT / 'native/file_parts_manifest.mm']
+                ROOT / 'native/f7zip.cpp', ROOT / ('native/zip_encoding.mm' if macos else 'native/zip_encoding.cpp'),
+                ROOT / ('native/file_parts_manifest.mm' if macos else 'native/file_parts_manifest.cpp')]
 
     header_time = max(path.stat().st_mtime for pattern in ('*.h', '*.hpp')
                       for path in (ROOT / 'native').glob(pattern))
 
     def compile_source(source):
-        name = str(source.relative_to(ROOT / 'native')).replace('/', '_') + '.o'
+        name = source.relative_to(ROOT / 'native').as_posix().replace('/', '_') + '.o'
         output = OBJECTS / name
         if not output.exists() or output.stat().st_mtime < max(source.stat().st_mtime, Path(__file__).stat().st_mtime, header_time):
-            run(['clang++', *flags, '-c', source, '-o', output])
+            run([compiler, *flags, '-c', source, '-o', output])
         return output
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         objects = list(pool.map(compile_source, sources))
-    run(['clang++', '-dynamiclib', '-mmacosx-version-min=12.0', *objects,
-         '-framework', 'Foundation', '-o', LIB / 'libf7zip.dylib', '-install_name', '@rpath/libf7zip.dylib'])
-    run(['clang++', '-std=c++17', '-O2', '-mmacosx-version-min=12.0',
-         ROOT / 'native/f7zip_cli.mm', '-L' + str(LIB), '-lf7zip', '-framework', 'Foundation',
-         '-Wl,-rpath,@executable_path', '-Wl,-rpath,@executable_path/../Frameworks/F7Zip',
-         '-o', LIB / 'f7zip'])
+    if macos:
+        run([compiler, '-dynamiclib', '-mmacosx-version-min=12.0', *objects,
+             '-framework', 'Foundation', '-o', LIB / 'libf7zip.dylib', '-install_name', '@rpath/libf7zip.dylib'])
+        run([compiler, '-std=c++17', '-O2', '-mmacosx-version-min=12.0',
+             ROOT / 'native/f7zip_cli.mm', '-L' + str(LIB), '-lf7zip', '-framework', 'Foundation',
+             '-Wl,-rpath,@executable_path', '-Wl,-rpath,@executable_path/../Frameworks/F7Zip',
+             '-o', LIB / 'f7zip'])
+    else:
+        library_name = 'f7zip.dll' if windows else 'libf7zip.so'
+        # 复用 7-Zip 自带的公开领域 SHA-256 实现。
+        objects += [bundle / '_o' / name for name in ('Sha256.o', 'Sha256Opt.o', 'CpuArch.o')]
+        link_flags = ['-Wl,--export-all-symbols', '-Wl,--out-implib,' + str(LIB / 'libf7zip.dll.a')] if windows else ['-Wl,-rpath,$ORIGIN']
+        run([compiler, '-shared', *objects, *libraries, *link_flags, '-o', LIB / library_name])
+        cli_objects = []
+        if windows:
+            resource = OBJECTS / 'cli.rc'
+            resource.write_text('1 24 "' + (ROOT / 'windows/runner/runner.exe.manifest').as_posix() + '"\n')
+            run(['windres', resource, '-o', OBJECTS / 'cli-resource.o'])
+            cli_objects.append(OBJECTS / 'cli-resource.o')
+        run([compiler, *flags, ROOT / 'native/f7zip_cli.cpp', *cli_objects, '-L' + str(LIB), '-lf7zip',
+             *libraries, *([] if windows else ['-Wl,-rpath,$ORIGIN', '-Wl,-rpath,$ORIGIN/lib']),
+             '-o', LIB / ('f7zip-cli.exe' if windows else 'f7zip-cli')])
     sfx_module = ROOT / 'native/sfx/7z-x86.sfx'
     if hashlib.sha256(sfx_module.read_bytes()).hexdigest() != '73af2700392aa92bc9342ae63844dfeed157d8d68bd356326a9bddb5e9e312d7':
         raise RuntimeError('Windows SFX 模块校验失败')
@@ -259,6 +367,19 @@ def main():
     shutil.copy2(ENGINE / 'DOC/License.txt', licenses / '7zip.txt')
     shutil.copy2(ENGINE / 'DOC/copying.txt', licenses / 'LGPL-2.1.txt')
     shutil.copy2(BIT7Z / 'LICENSE', licenses / 'bit7z-MPL-2.0.txt')
+    if not macos:
+        prefix = Path(subprocess.check_output(['pkg-config', '--variable=prefix', 'icu-uc'], text=True).strip())
+        for name, patterns in {
+            'ICU': ['share/licenses/icu/LICENSE*', 'share/icu/*/LICENSE*', 'share/doc/libicu-dev/copyright'],
+            'nlohmann-json': ['share/licenses/*json*/LICENSE*', 'share/doc/nlohmann-json3-dev/copyright'],
+        }.items():
+            matches = [path for pattern in patterns for path in prefix.glob(pattern) if path.is_file()]
+            if not matches:
+                raise RuntimeError(f'未找到 {name} 的分发许可证，请检查开发依赖是否完整安装')
+            for index, path in enumerate(matches):
+                shutil.copy2(path, licenses / f'{name}-{index + 1}.txt')
+    if windows:
+        bundle_windows_dependencies()
     print(f'7-Zip {ENGINE_VERSION} native libraries ready at {LIB}')
 
 

@@ -120,7 +120,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('编辑'));
+    await tester.tap(find.byIcon(Icons.edit_outlined));
     await _pumpUntil(tester, () => launches.length == 2);
     expect(launches.last['application'], '/Applications/Editor.app');
     final working = File(launches.last['path'] as String);

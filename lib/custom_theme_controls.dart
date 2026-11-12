@@ -1,11 +1,11 @@
+import 'desktop_bridge.dart';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import 'app_theme.dart';
 
-const _desktop = MethodChannel('sevenzip/desktop');
+const _desktop = DesktopBridge();
 
 class CustomThemeControls extends StatefulWidget {
   const CustomThemeControls({
@@ -206,7 +206,7 @@ class _ThemeEditorState extends State<_ThemeEditor> {
   late final _name = TextEditingController(text: widget.initial.name);
   late final _color = TextEditingController(text: widget.initial.hexColor);
 
-  static const _picker = MethodChannel('sevenzip/themeColor');
+  static const _picker = DesktopBridge(channel: 'sevenzip/themeColor');
   bool _picking = false;
   String? _pickerError;
 

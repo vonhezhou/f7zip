@@ -1,5 +1,6 @@
+import 'desktop_bridge.dart';
+
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import 'app_theme.dart';
 import 'custom_theme_controls.dart';
@@ -9,7 +10,7 @@ import 'compression_preset.dart';
 import 'compression_dialog.dart';
 import 'password_manager.dart';
 
-const _desktop = MethodChannel('sevenzip/desktop');
+const _desktop = DesktopBridge();
 
 class AppSettings {
   const AppSettings({
@@ -860,7 +861,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
           controller: controller,
           decoration: InputDecoration(
             labelText: label,
-            hintText: '/Applications/应用名称.app',
+            hintText: usesPortableDesktop
+                ? '应用程序的可执行文件路径'
+                : '/Applications/应用名称.app',
           ),
         ),
       ),

@@ -1,7 +1,12 @@
 // F7Zip 的旧 RAR 注释读取补充，复用 7-Zip 解码器并校验格式自带的 CRC。
 // 本文件随原始 7-Zip 源码和可重复应用的构建步骤一同分发。
 #pragma once
+#ifdef _WIN32
+#include <windows.h>
+#include <string>
+#else
 #include <iconv.h>
+#endif
 #include "../../../../C/7zCrc.h"
 #include "../../Common/StreamObjects.h"
 #include "../../Common/ProgressUtils.h"
@@ -89,6 +94,30 @@ static bool f7zipReadRarComment(const CByteBuffer &raw, ICompressCoder *decoder,
         if (CheckUTF8_AString(encoded) && ConvertUTF8ToUnicode(encoded, text)) return true;
     }
     // 旧注释没有编码标记，有效 UTF-8 优先，其余使用传统 OEM CP437。
+#ifdef _WIN32
+    std::wstring wide;
+    if (info.utf16) {
+        for (unsigned offset = 0; offset < unpackedSize; offset += 2) {
+            const auto value = GetUi16((const Byte *)decoded + offset);
+            if (value >= 0xdc00 && value <= 0xdfff) return false;
+            wide.push_back(static_cast<wchar_t>(value));
+            if (value >= 0xd800 && value <= 0xdbff) {
+                if (offset + 4 > unpackedSize) return false;
+                const auto low = GetUi16((const Byte *)decoded + offset + 2);
+                if (low < 0xdc00 || low > 0xdfff) return false;
+                wide.push_back(static_cast<wchar_t>(low));
+                offset += 2;
+            }
+        }
+    } else {
+        const int size = MultiByteToWideChar(437, 0, (const char *)(const Byte *)decoded, unpackedSize, nullptr, 0);
+        if (!size && unpackedSize) return false;
+        wide.resize(static_cast<size_t>(size));
+        if (size && !MultiByteToWideChar(437, 0, (const char *)(const Byte *)decoded, unpackedSize, wide.data(), size)) return false;
+    }
+    text.SetFrom(wide.c_str(), static_cast<unsigned>(wide.size()));
+    return true;
+#else
     CByteBuffer utf8((size_t)unpackedSize * 4 + 4);
     char *source = (char *)(Byte *)decoded;
     char *destination = (char *)(Byte *)utf8;
@@ -101,4 +130,5 @@ static bool f7zipReadRarComment(const CByteBuffer &raw, ICompressCoder *decoder,
     if (converted == (size_t)-1 || sourceLeft != 0) return false;
     encoded.SetFrom_CalcLen((const char *)(const Byte *)utf8, (unsigned)(utf8.Size() - destinationLeft));
     return ConvertUTF8ToUnicode(encoded, text);
+#endif
 }

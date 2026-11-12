@@ -69,7 +69,7 @@ with zipfile.ZipFile(sys.argv[1], 'w') as output:
     expect(settings['filenameEncoding'], 'shiftJis');
     await tester.tap(find.descendant(of: row, matching: find.byType(Checkbox)));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('编辑'));
+    await tester.tap(find.byIcon(Icons.edit_outlined));
     await _until(tester, () => workingFile != null);
     final manifests = Directory(p.join(root.path, 'sessions'))
         .listSync(recursive: true)

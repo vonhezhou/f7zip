@@ -1,16 +1,17 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <filesystem>
 
 uint32_t detectZipCodePage(const char* archive);
 
 // 每个调用线程单独设置编码，避免不同压缩包的并发操作互相影响。
 class ZipEncodingScope {
 public:
-    ZipEncodingScope(const char* engine, const char* archive, uint32_t requested);
+    ZipEncodingScope(const char* engine, const std::filesystem::path& archive, uint32_t requested);
     ~ZipEncodingScope();
     uint32_t codePage() const { return selected; }
-    void detectArchive(const char* archive);
+    void detectArchive(const std::filesystem::path& archive);
     ZipEncodingScope(const ZipEncodingScope&) = delete;
     ZipEncodingScope& operator=(const ZipEncodingScope&) = delete;
 private:

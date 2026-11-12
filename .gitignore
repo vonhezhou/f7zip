@@ -47,5 +47,5 @@ app.*.map.json
 # Widget Preview related
 .widget_preview/
 /native/vendor/
-/native/lib/
+/native/lib
 /dist/

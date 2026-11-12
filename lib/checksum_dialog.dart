@@ -1,3 +1,4 @@
+import 'desktop_bridge.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
@@ -21,7 +22,7 @@ class ChecksumDialog extends StatefulWidget {
 }
 
 class _ChecksumDialogState extends State<ChecksumDialog> {
-  static const _desktop = MethodChannel('sevenzip/desktop');
+  static const _desktop = DesktopBridge();
   Map<String, Map<String, dynamic>> _files = {};
   List<ChecksumEntry> _expected = [];
   List<String> _paths = [];

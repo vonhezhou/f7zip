@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'desktop_bridge.dart';
+
 const _window = MethodChannel('sevenzip/window');
 
 bool get windowControlsOnLeft =>
@@ -17,6 +19,8 @@ bool get windowControlsOnRight =>
 Future<void> initializeDesktopWindow() async {
   if (!windowControlsOnRight) return;
   await windowManager.ensureInitialized();
+  windowManager.addListener(_DesktopCleanup());
+  await windowManager.setPreventClose(true);
   await windowManager.waitUntilReadyToShow(
     const WindowOptions(
       title: 'F7Zip',
@@ -31,6 +35,22 @@ Future<void> initializeDesktopWindow() async {
       await windowManager.focus();
     },
   );
+}
+
+class _DesktopCleanup extends WindowListener {
+  bool _closing = false;
+  @override
+  void onWindowClose() async {
+    if (_closing) return;
+    _closing = true;
+    try {
+      await DesktopBridge.cleanup();
+      await windowManager.destroy();
+    } catch (_) {
+      _closing = false;
+      rethrow;
+    }
+  }
 }
 
 /// 只让顶部留白响应拖动，避免工具按钮触发窗口移动。

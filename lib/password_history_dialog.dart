@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import 'archive_password_history.dart';
+import 'desktop_bridge.dart';
 
 class PasswordHistoryDialog extends StatefulWidget {
   const PasswordHistoryDialog({super.key});
@@ -80,7 +81,7 @@ class _PasswordHistoryDialogState extends State<PasswordHistoryDialog> {
 
   Future<void> _reveal(ArchivePasswordRecord record) async {
     try {
-      await const MethodChannel('sevenzip/desktop').invokeMethod<void>('reveal', record.path);
+      await const DesktopBridge().invokeMethod<void>('reveal', record.path);
     } catch (error) {
       if (mounted) setState(() => _error = '定位压缩包失败。$error');
     }

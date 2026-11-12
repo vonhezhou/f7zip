@@ -1,0 +1,129 @@
+name: Desktop packages
+
+on:
+  push:
+    branches: [main, master, 'codex/**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PUB_HOSTED_URL: https://pub.dev
+  PYTHONUTF8: '1'
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            platform: windows
+          - runner: ubuntu-22.04
+            platform: linux
+          - runner: macos-15
+            platform: macos
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.9'
+          channel: stable
+          cache: true
+      - uses: actions/setup-python@v5
+        if: matrix.platform != 'windows'
+        with:
+          python-version: '3.12'
+      - name: Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang g++ cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libicu-dev nlohmann-json3-dev libmpv-dev libasound2-dev xdg-utils shared-mime-info xvfb
+      - name: Windows native toolchain
+        if: matrix.platform == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+          install: >-
+            git make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-icu
+            mingw-w64-ucrt-x86_64-nlohmann-json
+      - name: Dependencies and analysis
+        run: |
+          python scripts/ci_run.py flutter pub get
+          python scripts/ci_run.py flutter analyze
+      - name: Build Windows native engine
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: python scripts/ci_run.py python scripts/build_native.py
+      - name: Build macOS or Linux native engine
+        if: matrix.platform != 'windows'
+        run: python3 scripts/ci_run.py python3 scripts/build_native.py
+      - name: Windows archive regression checks
+        if: matrix.platform == 'windows'
+        run: python scripts/ci_run.py python test/desktop_native_smoke.py
+      - name: macOS or Linux archive regression checks
+        if: matrix.platform != 'windows'
+        run: python3 scripts/ci_run.py python3 test/desktop_native_smoke.py
+      - name: Build Windows package
+        if: matrix.platform == 'windows'
+        shell: msys2 {0}
+        run: python scripts/ci_run.py python scripts/build_desktop.py
+      - name: Build macOS or Linux package
+        if: matrix.platform != 'windows'
+        run: python3 scripts/ci_run.py python3 scripts/build_desktop.py
+      - name: macOS regression suite
+        if: matrix.platform == 'macos'
+        env:
+          F7ZIP_NATIVE_DIR: ${{ github.workspace }}/native/lib
+        run: |
+          python3 scripts/ci_run.py python3 -u scripts/ci_native_tests.py
+          python3 scripts/ci_run.py flutter test
+      - name: Windows desktop integration
+        if: matrix.platform == 'windows'
+        run: python scripts/ci_run.py flutter test integration_test/desktop_test.dart -d windows
+      - name: Linux desktop integration
+        if: matrix.platform == 'linux'
+        run: xvfb-run -a python3 scripts/ci_run.py flutter test integration_test/desktop_test.dart -d linux
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: F7Zip-${{ matrix.platform }}
+          if-no-files-found: error
+          path: |
+            dist/F7Zip-*.zip
+            dist/F7Zip-*.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+      - name: Collect release assets
+        run: |
+          mkdir release
+          find packages -type f ! -name F7Zip-sources.tar.gz -exec cp {} release/ \;
+          cp packages/F7Zip-macos/F7Zip-sources.tar.gz release/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

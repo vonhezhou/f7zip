@@ -18,7 +18,7 @@ else:
     import shutil
     shutil.copy2(ROOT / 'third_party/bit7z-source.tar.gz', bit7z_archive)
 excluded = {'.git', '.dart_tool', '.idea', '.vscode', 'build', 'dist', 'ephemeral',
-            '__pycache__', '.DS_Store', '.flutter-plugins-dependencies'}
+            '__pycache__', '.DS_Store', '.flutter-plugins-dependencies', 'Pods', '.symlinks'}
 with tarfile.open(DIST / 'F7Zip-sources.tar.gz', 'w:gz') as archive:
     for path in sorted(ROOT.rglob('*')):
         relative = path.relative_to(ROOT)

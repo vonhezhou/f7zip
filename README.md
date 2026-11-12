@@ -1,6 +1,6 @@
 # F7Zip
 
-基于 Flutter 与 7-Zip 原生共享库的开源跨平台桌面压缩工具。目前优先推进 macOS 的实现、构建和验证，各平台的支持程度以对应构建与测试记录为准。界面沿用桌面压缩软件常见的工具栏、目录导航与文件列表交互。
+基于 Flutter 与 7-Zip 原生共享库的开源跨平台桌面压缩工具。提供 Windows、macOS、Linux 桌面宿主工程，使用 GitHub Actions 在各自系统上编译和打包。界面沿用桌面压缩软件常见的工具栏、目录导航与文件列表交互。
 
 ## 立即运行
 
@@ -89,7 +89,7 @@ open dist/F7Zip.app
 
 主窗口顶栏按平台布局。macOS 左侧使用红黄绿按钮，分别关闭、最小化和切换全屏。Windows、Linux 右侧使用最小化、最大化／还原和关闭按钮，通过 `window_manager` 同步窗口状态。拖动顶栏留白移动窗口，macOS 双击遵循系统标题栏操作设置，Windows、Linux 双击切换最大化。工具栏采用紧凑横排，窄窗口中的查看、编辑等操作可在“更多操作”找到。
 
-当前仓库提供 macOS 宿主工程，Windows、Linux 的窗口布局与接口通过平台分支测试，尚需对应宿主工程和目标系统的原生运行验证。
+Windows、Linux 使用共享桌面接口实现系统文件面板、设置持久化、外部程序打开、文件关联、密码安全存储、主题选色、预览和拖出。macOS 使用 Swift 原生接口。Windows、Linux 的键盘快捷键使用 Ctrl。
 
 点击右上角齿轮或按 `⌘,` 打开设置。设置按常规、主题、压缩、解压、文件关联、外部程序和密码分为七页。“主题”页中的外观支持跟随系统（默认）、浅色和深色，保存后立即生效并随重启保留。切换主题同步 macOS 窗口和系统文件面板外观，跟随系统时响应系统外观变化。配色使用 Material 3 的 `ColorScheme.fromSeed`，侧栏、导航、表头、列表及状态区使用对应语义色。“主题”页中可选择经典紫（默认）、森林绿、青绿色、玫瑰粉、暖橙色和海洋蓝六组颜色主题，与明暗模式独立配置。选择时在设置窗口内预览，保存后全局生效并随重启保留，取消则保留原配色。欢迎页提供打开、新建及拖放提示，搜索支持一键清除。默认启用隔行背景、单击打开和 `..` 目录项，可在“常规”中切换，设置随应用重启保留。
 
@@ -122,19 +122,33 @@ ZIP / 7z 的添加、删除、重命名、新建文件夹和编辑回写会在�
 
 ## 构建
 
-需要 Flutter stable（Dart 3.13.7 或以上）、Xcode 命令行工具、Python 3.9+、Git 与网络连接。
+需要 Flutter 3.47.9（Dart 3.13.7）、Python 3.9+、Git 和目标平台工具链。在目标系统运行统一构建入口。
 
 ```sh
-./scripts/build_macos.sh
+python3 scripts/build_desktop.py
 ```
 
-首次构建自动下载固定版本的 7-Zip 和 bit7z 源码，校验后编译。后续构建复用本地源码和中间文件。生成的原生库会由 Xcode 构建阶段自动嵌入应用，无需预先安装命令行 7-Zip。
+| 目标平台 | 构建环境 | 发布产物 |
+| --- | --- | --- |
+| Windows x64 | Windows、Visual Studio C++ 桌面工具、MSYS2 UCRT64 | `dist/F7Zip-windows-x64.zip` |
+| macOS | macOS、Xcode、CocoaPods | `dist/F7Zip-macos-<架构>.zip` |
+| Linux x64 | Ubuntu 22.04+、GCC、Clang、CMake、Ninja、GTK 3 开发库 | `dist/F7Zip-linux-x64.tar.gz` |
 
-```text
-Flutter UI → Dart FFI → libf7zip.dylib（C++ / bit7z）→ 7z.so
+Windows 原生构建在 MSYS2 UCRT64 终端运行，需要 `make`、`git` 和 UCRT64 的 GCC、Clang、Python、pkgconf、ICU、nlohmann-json。打包脚本递归收集原生 DLL 依赖，应用使用 Windows UTF-8 和长路径清单。Windows 的已有默认应用由系统管理，文件关联操作会按需要打开系统默认应用设置。
+
+Linux 构建依赖安装命令如下。
+
+```sh
+sudo apt-get install clang g++ cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libicu-dev nlohmann-json3-dev libmpv-dev libasound2-dev xdg-utils shared-mime-info
 ```
 
-开发运行前先构建原生库。
+Linux 运行环境需要 GTK 3、ICU、Secret Service（例如 GNOME Keyring）和 libmpv。Linux 按 MIME 类型关联，同一类型的后缀共享默认程序。Windows 密码使用系统安全存储，Linux 使用 Secret Service。Windows、Linux 预览通过 Flutter 对话框展示，拖出先在私有临时目录准备内容，退出时清理。Windows 创建符号链接需要目标系统提供相应权限。
+
+macOS 也可继续使用 `./scripts/build_macos.sh`，产物位于 `dist/F7Zip.app`。该脚本执行本地签名。
+
+首次构建自动下载并校验固定版本的 7-Zip 26.06 和 bit7z 4.0.10 源码。桥接库按平台生成 `f7zip.dll`、`libf7zip.dylib` 或 `libf7zip.so`，随应用嵌入。Windows 引擎为 `7z.dll`，macOS、Linux 引擎为 `7z.so`。Windows、Linux 复用 7-Zip 自带的 SHA-256 实现，并通过 ICU 处理 Unicode 和旧编码检测。
+
+开发运行前先编译原生库。
 
 ```sh
 python3 scripts/build_native.py
@@ -142,14 +156,29 @@ flutter pub get
 flutter run -d macos
 ```
 
-Release 构建同时生成 `dist/F7Zip-sources.tar.gz`，包含自有代码和原始第三方源码，供开源发布及对应源码分发使用。
+Windows、Linux 开发运行时将最后一条命令的设备改为 `windows`、`linux`。Release 构建同时生成 `dist/F7Zip-sources.tar.gz`，包含自有代码和原始 7-Zip、bit7z 源码。
+
+### GitHub Actions
+
+工作流位于 `.github/workflows/desktop.yml`。向 `main`、`master` 或 `codex/**` 分支推送、提交 Pull Request，或手动执行工作流，均会启动 Windows、macOS、Linux 构建。构建任务执行静态检查、真实原生归档回归及平台打包，macOS 还执行完整 Python 和 Flutter 测试。
+
+构建通过后，从 Actions 页的 Artifacts 下载对应平台包。推送 `v*` 标签会在三平台全部通过后创建 GitHub Release，并上传发布包及对应源码包。包内保留原生引擎依赖与第三方许可证。
 
 ## 验证
+
+macOS 完整回归使用以下命令。
 
 ```sh
 flutter analyze
 python3 -m unittest discover -s test -p '*_test.py'
 F7ZIP_NATIVE_DIR="$PWD/native/lib" flutter test
+```
+
+三平台原生冒烟测试通过 `python3 test/desktop_native_smoke.py` 执行，Windows 使用 `python`。Windows、Linux 的真实宿主集成测试覆盖启动、原生库加载、打开 Unicode 归档、工具栏完整性测试和解压内容核对。
+
+```sh
+flutter test integration_test/desktop_test.dart -d windows
+xvfb-run -a flutter test integration_test/desktop_test.dart -d linux
 ```
 
 原生测试通过真实 C ABI 检查中文及换行文件名、ZIP / 7z 加密往返、独立 ZIP 读取、选中解压、错误密码和损坏文件恢复、路径越界、链接拒绝、取消及已有文件保护。Flutter 测试检查 Dart FFI / isolate 调用、文件树与目录导航、设置持久化、程序调用、编辑保存监控、重启恢复、失败重试及实际 ZIP 自动回写。

@@ -66,6 +66,8 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('更多操作'));
       await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(SubmenuButton, '工具'));
+      await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('自有归档密码恢复…'));
       await tester.tap(find.text('自有归档密码恢复…'));
       await tester.pumpAndSettle();

@@ -212,6 +212,8 @@ void main() {
             if (scenario == 'quick') {
               await tester.tap(find.byTooltip('更多操作'));
               await tester.pumpAndSettle();
+              await tester.tap(find.widgetWithText(SubmenuButton, '解压'));
+              await tester.pumpAndSettle();
               await tester.tap(find.text('快速解压到同级目录'));
               await _until(
                 tester,

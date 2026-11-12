@@ -75,10 +75,12 @@ void main() {
       if (scenario == 'readonly') {
         await tester.tap(find.byTooltip('更多操作'));
         await tester.pumpAndSettle();
-        final item = tester.widget<PopupMenuItem<String>>(
-          find.widgetWithText(PopupMenuItem<String>, '编辑文件注释…'),
+        await tester.tap(find.widgetWithText(SubmenuButton, '编辑压缩包'));
+        await tester.pumpAndSettle();
+        final item = tester.widget<MenuItemButton>(
+          find.widgetWithText(MenuItemButton, '编辑文件注释…'),
         );
-        expect(item.enabled, isFalse);
+        expect(item.onPressed, isNull);
         await tester.tapAt(const Offset(20, 300));
         await tester.pumpAndSettle();
       } else {

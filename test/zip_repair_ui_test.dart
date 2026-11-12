@@ -64,6 +64,8 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('更多操作'));
       await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(SubmenuButton, '工具'));
+      await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('修复 ZIP…'));
       await tester.tap(find.text('修复 ZIP…'));
       await _until(

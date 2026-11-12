@@ -64,6 +64,8 @@ void main() {
       var restored = false;
       await tester.tap(find.byTooltip('更多操作'));
       await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(SubmenuButton, '编辑压缩包'));
+      await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('恢复原包备份…'));
       await tester.tap(find.text('恢复原包备份…'));
       await _until(

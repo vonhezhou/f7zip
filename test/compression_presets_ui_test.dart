@@ -310,7 +310,18 @@ Future<void> _choose(WidgetTester tester, Finder dropdown, String text) async {
   await tester.ensureVisible(dropdown);
   await tester.tap(dropdown);
   await tester.pumpAndSettle();
-  await tester.ensureVisible(find.text(text).last);
+  final menu = find.byType(ListView).last;
+  final scrollable = find.descendant(
+    of: menu,
+    matching: find.byType(Scrollable),
+  );
+  tester.state<ScrollableState>(scrollable).position.jumpTo(0);
+  await tester.pump();
+  await tester.scrollUntilVisible(
+    find.descendant(of: menu, matching: find.text(text)),
+    120,
+    scrollable: scrollable,
+  );
   await tester.tap(find.text(text).last);
   await tester.pumpAndSettle();
 }

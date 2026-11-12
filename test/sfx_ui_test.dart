@@ -7,6 +7,7 @@ import 'package:f7zip/main.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
 
 void main() {
@@ -36,6 +37,7 @@ void main() {
   });
   for (final scenario in ['create', 'encrypted', 'retry']) {
     testWidgets('普通 Windows SFX 创建并以归档方式打开 $scenario', (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
       tester.view.physicalSize = const Size(1120, 900);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);

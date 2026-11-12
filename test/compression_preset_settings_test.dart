@@ -210,7 +210,18 @@ Future<void> _choose(WidgetTester tester, Key key, String label) async {
   await tester.ensureVisible(find.byKey(key));
   await tester.tap(find.byKey(key));
   await tester.pumpAndSettle();
-  await tester.ensureVisible(find.text(label).last);
+  final menu = find.byType(ListView).last;
+  final scrollable = find.descendant(
+    of: menu,
+    matching: find.byType(Scrollable),
+  );
+  tester.state<ScrollableState>(scrollable).position.jumpTo(0);
+  await tester.pump();
+  await tester.scrollUntilVisible(
+    find.descendant(of: menu, matching: find.text(label)),
+    120,
+    scrollable: scrollable,
+  );
   await tester.tap(find.text(label).last);
   await tester.pumpAndSettle();
 }

@@ -21,6 +21,7 @@ import 'edit_workspace.dart';
 import 'app_theme.dart';
 import 'compression_preset.dart';
 import 'compression_dialog.dart';
+import 'archive_password_history.dart';
 import 'welcome_panel.dart';
 import 'checksum_dialog.dart';
 import 'password_recovery_dialog.dart';
@@ -1423,6 +1424,14 @@ class _ArchiveWindowState extends State<ArchiveWindow> {
       if (result == null || !mounted) return false;
       final output = result['path'] as String;
       _lastOutput = output;
+      if (options.password.isNotEmpty) {
+        try {
+          await ArchivePasswordHistory.remember(output, options.password);
+        } catch (error) {
+          await _error('压缩包已创建，但密码历史保存失败，请自行保管本次密码。\n$error');
+        }
+      }
+      if (!mounted) return true;
       await _open(output, password: options.password);
       return true;
     } catch (error) {

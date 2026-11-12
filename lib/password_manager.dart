@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'password_history_dialog.dart';
+
 const _desktop = MethodChannel('sevenzip/desktop');
 
 class PasswordManager extends StatefulWidget {
@@ -101,6 +103,14 @@ class _PasswordManagerState extends State<PasswordManager> {
             onPressed: _busy ? null : _refresh,
             icon: const Icon(Icons.refresh, size: 18),
             label: const Text('刷新'),
+          ),
+          TextButton.icon(
+            onPressed: () => showDialog<void>(
+              context: context,
+              builder: (_) => const PasswordHistoryDialog(),
+            ),
+            icon: const Icon(Icons.history, size: 18),
+            label: const Text('压缩包密码历史'),
           ),
           if (_busy)
             const SizedBox(

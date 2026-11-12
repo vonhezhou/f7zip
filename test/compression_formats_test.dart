@@ -61,7 +61,10 @@ void main() {
       expect(archive.existsSync(), isTrue);
       expect(find.text('只读浏览'), findsOneWidget);
       final addButton = tester.widget<TextButton>(
-        find.ancestor(of: find.text('添加'), matching: find.byType(TextButton)),
+        find.ancestor(
+          of: find.byIcon(Icons.add_box_outlined),
+          matching: find.byType(TextButton),
+        ),
       );
       expect(addButton.onPressed, isNull);
       expect(tester.takeException(), isNull);
@@ -178,7 +181,18 @@ void main() {
 Future<void> _chooseFormat(WidgetTester tester, String label) async {
   await tester.tap(find.byKey(const ValueKey('compressionFormat')));
   await tester.pumpAndSettle();
-  await tester.ensureVisible(find.text(label).last);
+  final menu = find.byType(ListView).last;
+  final scrollable = find.descendant(
+    of: menu,
+    matching: find.byType(Scrollable),
+  );
+  tester.state<ScrollableState>(scrollable).position.jumpTo(0);
+  await tester.pump();
+  await tester.scrollUntilVisible(
+    find.descendant(of: menu, matching: find.text(label)),
+    120,
+    scrollable: scrollable,
+  );
   await tester.tap(find.text(label).last);
   await tester.pumpAndSettle();
 }

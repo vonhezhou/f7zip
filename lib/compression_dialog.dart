@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'app_theme.dart';
 import 'compression_parameters.dart';
 import 'compression_preset.dart';
+import 'password_generator_dialog.dart';
 
 class CompressionOptions {
   const CompressionOptions(
@@ -244,13 +245,46 @@ class _CompressionDialogState extends State<CompressionDialog> {
           : '新建压缩包',
     ),
     content: SizedBox(
-      width: 460,
+      width: 560,
       child: SingleChildScrollView(
         padding: const EdgeInsets.only(top: 8),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (!widget.presetOnly) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.of(context).field,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '压缩来源 · ${widget.inputs.length} 项',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: AppColors.of(context).secondary,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 52),
+                      child: SingleChildScrollView(
+                        child: SelectableText(
+                          widget.inputs.map(p.basename).join('\n'),
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
             if (widget.presetOnly) ...[
               TextField(
                 key: const ValueKey('presetName'),
@@ -274,6 +308,11 @@ class _CompressionDialogState extends State<CompressionDialog> {
                       decoration: const InputDecoration(labelText: '压缩预设'),
                       child: DropdownButtonHideUnderline(
                         child: DropdownButton<String>(
+                          menuMaxHeight: 280,
+                          dropdownColor: Theme.of(context)
+                              .colorScheme
+                              .surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(8),
                           key: const ValueKey('compressionPreset'),
                           value: _presetName,
                           isDense: true,
@@ -311,6 +350,16 @@ class _CompressionDialogState extends State<CompressionDialog> {
                   ),
                   const SizedBox(width: 6),
                   IconButton(
+                    tooltip: '重置压缩设置',
+                    onPressed: _savingPreset
+                        ? null
+                        : () => setState(() {
+                            _loadPreset(const CompressionPreset(name: ''));
+                            _presetError = null;
+                          }),
+                    icon: const Icon(Icons.restart_alt, size: 20),
+                  ),
+                  IconButton(
                     tooltip: '保存压缩预设',
                     onPressed: _savingPreset || _volumeSize == null
                         ? null
@@ -335,37 +384,16 @@ class _CompressionDialogState extends State<CompressionDialog> {
                 ),
               ),
             const SizedBox(height: 12),
-            if (!widget.presetOnly) ...[
-              Text(
-                '已选择 ${widget.inputs.length} 个文件或文件夹',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: AppColors.of(context).secondary,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Container(
-                constraints: const BoxConstraints(maxHeight: 84),
-                width: double.infinity,
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.of(context).field,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: SingleChildScrollView(
-                  child: Text(
-                    widget.inputs.map(p.basename).join('\n'),
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
-            Row(
+            KeyedSubtree(
               key: ValueKey('presetFormat:$_presetRevision'),
-              children: [
-                Expanded(
-                  child: DropdownButtonFormField<String>(
+              child: Column(
+                children: [
+                  DropdownButtonFormField<String>(
+                    menuMaxHeight: 280,
+                    dropdownColor: Theme.of(context)
+                        .colorScheme
+                        .surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(8),
                     initialValue: _format,
                     key: const ValueKey('compressionFormat'),
                     isExpanded: true,
@@ -381,7 +409,11 @@ class _CompressionDialogState extends State<CompressionDialog> {
                       ),
                       DropdownMenuItem(
                         value: 'sfx',
-                        child: Text('Windows 自解压 EXE · x86'),
+                        child: Text(
+                          'Windows 自解压 EXE · x86',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                       DropdownMenuItem(value: 'wim', child: Text('WIM · 仅存储')),
                       DropdownMenuItem(value: '7z', child: Text('7z · 压缩率优先')),
@@ -403,61 +435,91 @@ class _CompressionDialogState extends State<CompressionDialog> {
                         ? null
                         : (value) => _changeOptions(() => _format = value!),
                   ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: DropdownButtonFormField<int>(
-                    key: ValueKey('compressionLevel:$_format'),
-                    initialValue: _level,
-                    decoration: const InputDecoration(labelText: '压缩等级'),
-                    items: const [
-                      DropdownMenuItem(value: 0, child: Text('仅存储')),
-                      DropdownMenuItem(value: 1, child: Text('最快')),
-                      DropdownMenuItem(value: 5, child: Text('标准')),
-                      DropdownMenuItem(value: 7, child: Text('最大')),
-                      DropdownMenuItem(value: 9, child: Text('极限')),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: DropdownButtonFormField<int>(
+                          menuMaxHeight: 280,
+                          dropdownColor: Theme.of(context)
+                              .colorScheme
+                              .surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(8),
+                          key: ValueKey('compressionLevel:$_format'),
+                          initialValue: _level,
+                          decoration: const InputDecoration(labelText: '压缩等级'),
+                          items: const [
+                            DropdownMenuItem(value: 0, child: Text('仅存储')),
+                            DropdownMenuItem(value: 1, child: Text('最快')),
+                            DropdownMenuItem(value: 5, child: Text('标准')),
+                            DropdownMenuItem(value: 7, child: Text('最大')),
+                            DropdownMenuItem(value: 9, child: Text('极限')),
+                          ],
+                          onChanged:
+                              _savingPreset ||
+                                  const {'tar', 'wim'}.contains(_format)
+                              ? null
+                              : (value) =>
+                                    _changeOptions(() => _level = value!),
+                        ),
+                      ),
+                      if (_supportsVolumes) ...[
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: KeyedSubtree(
+                            key: ValueKey('presetVolume:$_presetRevision'),
+                            child: DropdownButtonFormField<String>(
+                              menuMaxHeight: 280,
+                              dropdownColor: Theme.of(context)
+                                  .colorScheme
+                                  .surfaceContainerHigh,
+                              borderRadius: BorderRadius.circular(8),
+                              key: const ValueKey('volumeSize'),
+                              initialValue: _volume,
+                              decoration: const InputDecoration(
+                                labelText: '分卷大小',
+                              ),
+                              items: const [
+                                DropdownMenuItem(
+                                  value: 'none',
+                                  child: Text('不分卷'),
+                                ),
+                                DropdownMenuItem(
+                                  value: '10',
+                                  child: Text('10 MiB'),
+                                ),
+                                DropdownMenuItem(
+                                  value: '100',
+                                  child: Text('100 MiB'),
+                                ),
+                                DropdownMenuItem(
+                                  value: '500',
+                                  child: Text('500 MiB'),
+                                ),
+                                DropdownMenuItem(
+                                  value: '2048',
+                                  child: Text('2 GiB'),
+                                ),
+                                DropdownMenuItem(
+                                  value: 'custom',
+                                  child: Text('自定义'),
+                                ),
+                              ],
+                              onChanged: _savingPreset
+                                  ? null
+                                  : (value) =>
+                                        _changeOptions(() => _volume = value!),
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
-                    onChanged:
-                        _savingPreset || const {'tar', 'wim'}.contains(_format)
-                        ? null
-                        : (value) => _changeOptions(() => _level = value!),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
             const SizedBox(height: 12),
-            if (const {'zip', 'zipx'}.contains(_format)) ...[
-              const Text(
-                '文件名编码 · UTF-8（跨平台）',
-                key: ValueKey('zipCreationEncoding'),
-              ),
-              const SizedBox(height: 4),
-              const Text(
-                '写入 UTF-8 标志，供 Windows、macOS 和 Linux 识别。接收方需使用支持 UTF-8 的解压软件。',
-                style: TextStyle(fontSize: 12),
-              ),
-              const SizedBox(height: 12),
-            ],
             if (_supportsVolumes) ...[
-              KeyedSubtree(
-                key: ValueKey('presetVolume:$_presetRevision'),
-                child: DropdownButtonFormField<String>(
-                  key: const ValueKey('volumeSize'),
-                  initialValue: _volume,
-                  decoration: const InputDecoration(labelText: '分卷大小'),
-                  items: const [
-                    DropdownMenuItem(value: 'none', child: Text('不分卷')),
-                    DropdownMenuItem(value: '10', child: Text('10 MiB')),
-                    DropdownMenuItem(value: '100', child: Text('100 MiB')),
-                    DropdownMenuItem(value: '500', child: Text('500 MiB')),
-                    DropdownMenuItem(value: '2048', child: Text('2 GiB')),
-                    DropdownMenuItem(value: 'custom', child: Text('自定义')),
-                  ],
-                  onChanged: _savingPreset
-                      ? null
-                      : (value) => _changeOptions(() => _volume = value!),
-                ),
-              ),
               if (_volume == 'custom') ...[
                 const SizedBox(height: 12),
                 TextField(
@@ -487,21 +549,48 @@ class _CompressionDialogState extends State<CompressionDialog> {
                 decoration: InputDecoration(
                   labelText: '密码（可选）',
                   hintText: '留空则不加密',
-                  suffixIcon: IconButton(
-                    onPressed: () =>
-                        setState(() => _showPassword = !_showPassword),
-                    icon: Icon(
-                      _showPassword
-                          ? Icons.visibility_off_outlined
-                          : Icons.visibility_outlined,
-                      size: 18,
-                    ),
+                  helperText: const {'zip', 'zipx'}.contains(_format)
+                      ? 'ZIP 密码请使用 ASCII 字符'
+                      : null,
+                  suffixIcon: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: '生成随机密码',
+                        onPressed: () async {
+                          final password = await showDialog<String>(
+                            context: context,
+                            builder: (_) => const PasswordGeneratorDialog(),
+                          );
+                          if (password != null && mounted) {
+                            setState(() => _password.text = password);
+                          }
+                        },
+                        icon: const Icon(Icons.casino_outlined, size: 18),
+                      ),
+                      IconButton(
+                        tooltip: _showPassword ? '隐藏密码' : '显示密码',
+                        onPressed: () =>
+                            setState(() => _showPassword = !_showPassword),
+                        icon: Icon(
+                          _showPassword
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                          size: 18,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
             const SizedBox(height: 12),
             if (const {'zip', 'zipx'}.contains(_format))
               DropdownButtonFormField<String>(
+                menuMaxHeight: 280,
+                dropdownColor: Theme.of(context)
+                    .colorScheme
+                    .surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(8),
                 key: ValueKey('presetEncryption:$_presetRevision'),
                 initialValue: _encryption,
                 decoration: const InputDecoration(labelText: '加密算法'),
@@ -526,13 +615,20 @@ class _CompressionDialogState extends State<CompressionDialog> {
                     ? null
                     : (value) => _changeOptions(() => _encryptNames = value!),
               ),
+            if (_format != 'tar') const Divider(height: 24),
             if (_format != 'tar')
               ExpansionTile(
                 key: ValueKey('advanced:$_format:$_level:$_presetRevision'),
                 tilePadding: EdgeInsets.zero,
+                childrenPadding: const EdgeInsets.fromLTRB(2, 12, 2, 0),
                 title: const Text('高级压缩参数'),
                 children: [
                   DropdownButtonFormField<String>(
+                    menuMaxHeight: 280,
+                    dropdownColor: Theme.of(context)
+                        .colorScheme
+                        .surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(8),
                     key: ValueKey('compressionMethod:${_parameters.method}'),
                     initialValue: _parameters.method,
                     decoration: const InputDecoration(labelText: '压缩算法'),
@@ -563,6 +659,11 @@ class _CompressionDialogState extends State<CompressionDialog> {
                   if (_parameters.supportsDictionary(_format, _level)) ...[
                     const SizedBox(height: 12),
                     DropdownButtonFormField<int>(
+                      menuMaxHeight: 280,
+                      dropdownColor: Theme.of(context)
+                          .colorScheme
+                          .surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(8),
                       key: ValueKey(
                         'compressionDictionary:${_parameters.dictionaryMiB}',
                       ),
@@ -590,6 +691,11 @@ class _CompressionDialogState extends State<CompressionDialog> {
                   if (_parameters.supportsSolid(_format, _level)) ...[
                     const SizedBox(height: 12),
                     DropdownButtonFormField<int>(
+                      menuMaxHeight: 280,
+                      dropdownColor: Theme.of(context)
+                          .colorScheme
+                          .surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(8),
                       key: ValueKey('compressionSolid:${_parameters.solidMiB}'),
                       initialValue: _parameters.solidMiB,
                       decoration: const InputDecoration(labelText: '固实块大小'),
@@ -621,6 +727,11 @@ class _CompressionDialogState extends State<CompressionDialog> {
                   if (CompressionParameters.supportsThreads(_format)) ...[
                     const SizedBox(height: 12),
                     DropdownButtonFormField<int>(
+                      menuMaxHeight: 280,
+                      dropdownColor: Theme.of(context)
+                          .colorScheme
+                          .surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(8),
                       key: ValueKey(
                         'compressionThreads:${_parameters.threads}',
                       ),
@@ -658,30 +769,29 @@ class _CompressionDialogState extends State<CompressionDialog> {
                   ),
                 ],
               ),
-            const SizedBox(height: 12),
-            Text(
-              widget.presetOnly
-                  ? '压缩预设保存格式、等级、分卷及高级参数。密码在每次创建任务中按需输入。'
-                  : !_validInput
-                  ? '此格式需要选择一个普通文件。多个文件或文件夹可选择 ZIP、7z 或 TAR。'
-                  : switch (_format) {
-                      '7z' => '7z 使用 AES-256。填写密码后启用加密。',
-                      'zip' => '填写密码后启用所选加密算法。ZIP 密码请使用 ASCII 字符。',
-                      'sfx' => '生成供 Windows x86 运行的单个 EXE，可用于支持 32 位程序的 x64 系统。普通解压模块在解压完成后结束，包内文件的可信度由来源决定。生成包未签名，Windows 安全策略可能提示或阻止运行。',
-                      'wim' => 'WIM 使用引擎支持的存储方式，不支持密码和分卷；用于数据归档。',
-                      'tar' => 'TAR 保留目录结构，仅打包，不进行压缩。',
-                      'tar.gz' ||
-                      'tar.bz2' ||
-                      'tar.xz' => '先打包为 TAR，再压缩，保留目录结构。',
-                      _ => '压缩单个文件，保留文件内容。',
-                    },
-              style: TextStyle(
-                fontSize: 11,
-                color: _validInput
-                    ? AppColors.of(context).secondary
-                    : Theme.of(context).colorScheme.error,
+            if (widget.presetOnly ||
+                !_validInput ||
+                const {'sfx', 'wim'}.contains(_format))
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Text(
+                  widget.presetOnly
+                      ? '压缩预设保存格式、等级、分卷及高级参数。密码在每次创建任务中按需输入。'
+                      : !_validInput
+                      ? '此格式需要选择一个普通文件。多个文件或文件夹可选择 ZIP、7z 或 TAR。'
+                      : switch (_format) {
+                          'sfx' => '生成供 Windows x86 运行的单个 EXE，可用于支持 32 位程序的 x64 系统。普通解压模块在解压完成后结束，包内文件的可信度由来源决定。生成包未签名，Windows 安全策略可能提示或阻止运行。',
+                          'wim' => 'WIM 使用引擎支持的存储方式，不支持密码和分卷；用于数据归档。',
+                          _ => '',
+                        },
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: _validInput
+                        ? AppColors.of(context).secondary
+                        : Theme.of(context).colorScheme.error,
+                  ),
+                ),
               ),
-            ),
           ],
         ),
       ),
